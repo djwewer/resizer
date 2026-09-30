@@ -4,27 +4,25 @@
 Рендер робить нативний `ffmpeg` на вашому комп'ютері з апаратним енкодером (Apple VideoToolbox,
 NVIDIA NVENC, Intel Quick Sync, AMD AMF, VAAPI), браузер — лише інтерфейс на `localhost`.
 
-## Встановлення
+## macOS — застосунок Resizer.app
 
-Потрібні **Python 3.9+** і **ffmpeg**:
+1. Скачайте папку: `git clone https://github.com/djwewer/resizer.git`
+   (або на GitHub **Code → Download ZIP** і розпакуйте).
+2. Двічі клікніть **Resizer.app** у папці `resizer`.
+   - Перший запуск: якщо немає ffmpeg — застосунок запропонує встановити його сам (відкриється Термінал, один раз).
+   - Якщо macOS пише «неможливо перевірити розробника»: **Системні параметри → Конфіденційність і безпека → Все одно відкрити**
+     (або в Терміналі: `xattr -dr com.apple.quarantine ~/шлях/до/resizer`). Це потрібно лише один раз.
+3. Відкриється вкладка в браузері — перетягніть відео, **Рендерити**, дивіться прев'ю, завантажуйте.
 
-| ОС      | ffmpeg                          |
-|---------|---------------------------------|
-| macOS   | `brew install ffmpeg`           |
-| Windows | `winget install Gyan.FFmpeg`    |
-| Linux   | `sudo apt install ffmpeg`       |
+- Готові файли: **~/Movies/Resizer** (кнопка «Відкрити папку» в інтерфейсі).
+- Щоб тримати в Dock — перетягніть Resizer.app з папки в Dock. **Не переносьте** сам застосунок з папки `resizer`: він запускає `resizer.py` поруч.
+- Terminal не потрібен: сервер працює у фоні й сам зупиняється через 5 хв після закриття вкладки (якщо не йде рендер).
+- Лог: `~/Library/Logs/Resizer.log`. Оновлення: `git pull` у папці.
 
-Інших залежностей немає.
+## Windows / Linux
 
-## Запуск з інтерфейсом
-
-```bash
-python3 resizer.py
-```
-
-або подвійний клік: `start.command` (macOS), `start.bat` (Windows), `start.sh` (Linux).
-Відкриється `http://127.0.0.1:8765`: перетягніть відео → налаштуйте → **Рендерити** → дивіться прев'ю та завантажуйте.
-Готові файли також лежать у папці `output/`.
+Потрібні **Python 3.9+** і **ffmpeg** (`winget install Gyan.FFmpeg` / `sudo apt install ffmpeg`).
+Запуск: `start.bat` (Windows), `start.sh` (Linux) або `python3 resizer.py`. Готові файли — у папці `output/`.
 
 ## Запуск з терміналу (без інтерфейсу, пакетно)
 

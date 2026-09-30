@@ -434,6 +434,7 @@ def run_job(job: Job, on_progress=None) -> None:
 # --------------------------------------------------------------------------- #
 
 UPLOADS: dict[str, dict] = {}
+LAST_SEEN = time.time()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -442,6 +443,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):  # quiet
         pass
+
+    def parse_request(self):
+        global LAST_SEEN
+        LAST_SEEN = time.time()
+        return super().parse_request()
 
     # ---- helpers ---------------------------------------------------------- #
     def send_json(self, obj, status=200):
@@ -523,6 +529,8 @@ class Handler(BaseHTTPRequestHandler):
         p = unquote(url.path)
         q = parse_qs(url.query)
 
+        if p == "/api/ping":
+            return self.send_json({"app": "resizer"})
         if p == "/api/info":
             enc = detect_encoders()
             return self.send_json({
@@ -618,7 +626,7 @@ def open_in_file_manager(path: Path) -> None:
         pass
 
 
-def serve(port: int, open_browser: bool) -> None:
+def serve(port: int, open_browser: bool, idle_exit: int = 0) -> None:
     shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
     threading.Thread(target=detect_encoders, daemon=True).start()
     httpd = None
@@ -635,6 +643,17 @@ def serve(port: int, open_browser: bool) -> None:
     print(f"\n  Resizer працює: {url}\n  Готові файли:   {OUTPUT_DIR}\n  Зупинити:       Ctrl+C\n")
     if open_browser:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+    if idle_exit > 0:
+        # Launched from Resizer.app: no terminal to Ctrl+C, so stop by ourselves
+        # once the browser tab is gone (it pings every 15 s) and nothing renders.
+        def watchdog():
+            while True:
+                time.sleep(10)
+                busy = any(j.status in ("queued", "running") for j in JOBS.values())
+                if not busy and time.time() - LAST_SEEN > idle_exit:
+                    httpd.shutdown()
+                    return
+        threading.Thread(target=watchdog, daemon=True).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -727,9 +746,16 @@ def main() -> None:
     ap.add_argument("-o", "--out", help="папка для результатів (./output)")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--idle-exit", type=int, default=0,
+                    help="зупинити сервер через N секунд після закриття вкладки (0 — ніколи)")
+    ap.add_argument("--work", help="папка для тимчасових файлів (./work)")
     ap.add_argument("--list-encoders", action="store_true")
     args = ap.parse_args()
 
+    global OUTPUT_DIR, WORK_DIR, UPLOAD_DIR
+    if args.work:
+        WORK_DIR = Path(args.work).expanduser().resolve()
+        UPLOAD_DIR = WORK_DIR / "uploads"
     check_ffmpeg()
     if args.list_encoders:
         for codec, encs in detect_encoders().items():
@@ -739,9 +765,8 @@ def main() -> None:
         cli(args)
     else:
         if args.out:
-            global OUTPUT_DIR
             OUTPUT_DIR = Path(args.out).expanduser().resolve()
-        serve(args.port, not args.no_browser)
+        serve(args.port, not args.no_browser, args.idle_exit)
 
 
 if __name__ == "__main__":

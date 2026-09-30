@@ -396,6 +396,9 @@
 
   $('#openFolder').addEventListener('click', () => fetch('/api/open-folder', { method: 'POST' }));
 
+  // Keeps the local server alive while this tab is open (Resizer.app stops it when idle).
+  setInterval(() => fetch('/api/ping').catch(() => {}), 15000);
+
   applySettingsToUI();
   loadInfo();
 })();
