@@ -1,10 +1,10 @@
 #!/bin/bash
 # Resizer.app launcher: starts the local server in the background and opens the browser.
-# The app must stay inside the resizer folder (next to resizer.py).
+# Self-contained: the Python code is in Contents/Resources, so the app works from anywhere.
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 APP="$(cd "$(dirname "$0")/../.." && pwd)"
-ROOT="$(dirname "$APP")"
+SCRIPT="$APP/Contents/Resources/resizer.py"
 PORT=8765
 URL="http://127.0.0.1:$PORT"
 LOG="$HOME/Library/Logs/Resizer.log"
@@ -21,8 +21,8 @@ if curl -s --max-time 1 "$URL/api/ping" | grep -q resizer; then
   exit 0
 fi
 
-if [ ! -f "$ROOT/resizer.py" ]; then
-  alert "Не знайдено resizer.py. Resizer.app має лежати в папці resizer. Щоб додати в Dock — перетягніть іконку з цієї папки, не копіюйте застосунок."
+if [ ! -f "$SCRIPT" ]; then
+  alert "Застосунок пошкоджено: немає Contents/Resources/resizer.py. Скачайте Resizer ще раз."
   exit 1
 fi
 
@@ -55,7 +55,7 @@ if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; 
 fi
 
 mkdir -p "$(dirname "$LOG")" "$OUT"
-nohup "$PY" "$ROOT/resizer.py" --port "$PORT" --out "$OUT" --work "$WORK" --idle-exit 300 \
+nohup "$PY" "$SCRIPT" --port "$PORT" --out "$OUT" --work "$WORK" --idle-exit 300 \
   >"$LOG" 2>&1 </dev/null &
 PID=$!
 disown

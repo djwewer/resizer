@@ -15,14 +15,14 @@ NVIDIA NVENC, Intel Quick Sync, AMD AMF, VAAPI), браузер — лише і�
 3. Відкриється вкладка в браузері — перетягніть відео, **Рендерити**, дивіться прев'ю, завантажуйте.
 
 - Готові файли: **~/Movies/Resizer** (кнопка «Відкрити папку» в інтерфейсі).
-- Щоб тримати в Dock — перетягніть Resizer.app з папки в Dock. **Не переносьте** сам застосунок з папки `resizer`: він запускає `resizer.py` поруч.
+- Застосунок самодостатній: його можна перенести в «Програми» і закріпити в Dock. Решта папки для Mac не потрібна.
 - Terminal не потрібен: сервер працює у фоні й сам зупиняється через 5 хв після закриття вкладки (якщо не йде рендер).
-- Лог: `~/Library/Logs/Resizer.log`. Оновлення: `git pull` у папці.
+- Лог: `~/Library/Logs/Resizer.log`. Оновлення: скачати новий Resizer.app і замінити старий.
 
 ## Windows / Linux
 
 Потрібні **Python 3.9+** і **ffmpeg** (`winget install Gyan.FFmpeg` / `sudo apt install ffmpeg`).
-Запуск: `start.bat` (Windows), `start.sh` (Linux) або `python3 resizer.py`. Готові файли — у папці `output/`.
+Запуск: `start.bat` (Windows), `start.sh` (Linux) або `python3 resizer.py` (код лежить у `Resizer.app/Contents/Resources`). Готові файли — у папці `output/`.
 
 ## Запуск з терміналу (без інтерфейсу, пакетно)
 
