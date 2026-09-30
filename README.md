@@ -29,6 +29,7 @@ NVIDIA NVENC, Intel Quick Sync, AMD AMF, VAAPI), браузер — лише і�
 ```bash
 python3 resizer.py video.mp4                     # 16:9 + 1:1, 5 Мбіт/с, 1080p
 python3 resizer.py *.mov -b 8 -r 1440            # кілька файлів, 8 Мбіт/с, 1440p
+python3 resizer.py clip.mp4 -n "Моя назва"                # → 16x9_Моя назва.mp4, 1x1_Моя назва.mp4
 python3 resizer.py clip.mp4 -f 16x9 --blur 70 --dim 40 -o ~/Desktop/out
 python3 resizer.py --list-encoders               # які енкодери працюють на цій машині
 ```
@@ -43,6 +44,7 @@ python3 resizer.py --list-encoders               # які енкодери пр�
 | `--codec`         | `h264`           | `h264` або `hevc`                          |
 | `--encoder`       | `auto`           | конкретний енкодер ffmpeg, напр. `h264_nvenc` |
 | `--no-hwdec`      | —                | вимкнути апаратне декодування              |
+| `-n, --name`      | назва вхідного   | назва виходу (для одного файлу), формат іде префіксом |
 | `-o, --out`       | `./output`       | папка для результатів                      |
 
 ## Чому швидко

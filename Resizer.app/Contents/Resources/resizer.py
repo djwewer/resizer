@@ -277,6 +277,13 @@ def encoder_args(enc: str, mbps: float) -> list[str]:
     return ["-c:v", enc, *rate]
 
 
+def clean_name(name: str) -> str:
+    """Make a user-typed name safe for macOS/Windows/Linux file systems."""
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", name)
+    name = re.sub(r"\s+", " ", name).strip(" .")
+    return name[:150] or "video"
+
+
 def unique_path(p: Path) -> Path:
     if not p.exists():
         return p
@@ -324,6 +331,7 @@ class Job:
     name: str
     info: dict
     opts: RenderOptions
+    out_name: str = ""              # output base name; formats are prefixed: 16x9_<out_name>.mp4
     status: str = "queued"          # queued | running | done | error | cancelled
     progress: float = 0.0
     speed: float = 0.0
@@ -353,7 +361,7 @@ def run_job(job: Job, on_progress=None) -> None:
     """Run ffmpeg for a job. Falls back: hw decode off -> CPU encoder."""
     job.status = "running"
     job.started = time.time()
-    stem = re.sub(r"[^\w\-. ]+", "_", Path(job.name).stem).strip() or "video"
+    stem = clean_name(job.out_name or Path(job.name).stem)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     enc = pick_encoder(job.opts.codec, job.opts.encoder)
@@ -366,7 +374,7 @@ def run_job(job: Job, on_progress=None) -> None:
     duration = job.info.get("duration") or 0
     last_err = ""
     for enc_try, hwdec in attempts:
-        outs = [unique_path(OUTPUT_DIR / f"{stem}_{fmt}.mp4") for fmt in job.opts.formats]
+        outs = [unique_path(OUTPUT_DIR / f"{fmt}_{stem}.mp4") for fmt in job.opts.formats]
         cmd = build_command(job.src, job.info, job.opts, enc_try, hwdec, outs)
         job.encoder = enc_try
         job.progress = 0.0
@@ -609,7 +617,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"error": "Файл не знайдено, завантажте його ще раз"}, 404)
         opts = RenderOptions.from_dict(body)
         job = Job(id=uuid.uuid4().hex[:12], src=Path(up["path"]), name=up["name"],
-                  info=up["info"], opts=opts)
+                  info=up["info"], opts=opts, out_name=str(body.get("name") or ""))
         JOBS[job.id] = job
         threading.Thread(target=run_job, args=(job,), daemon=True).start()
         return self.send_json(job.public())
@@ -705,7 +713,8 @@ def cli(args) -> None:
             print(f"✗ {path.name}: {e}")
             failed += 1
             continue
-        job = Job(id="cli", src=path, name=path.name, info=info, opts=opts)
+        out_name = args.name if args.name and len(args.inputs) == 1 else ""
+        job = Job(id="cli", src=path, name=path.name, info=info, opts=opts, out_name=out_name)
 
         def show(j: Job):
             bar = int(j.progress * 30)
@@ -744,6 +753,7 @@ def main() -> None:
     ap.add_argument("--codec", choices=list(ENCODERS), default="h264")
     ap.add_argument("--encoder", default="auto", help="auto або назва ffmpeg-енкодера")
     ap.add_argument("--no-hwdec", action="store_true", help="не використовувати апаратне декодування")
+    ap.add_argument("-n", "--name", help="назва вихідних файлів (лише для одного файлу): 16x9_<назва>.mp4")
     ap.add_argument("-o", "--out", help="папка для результатів (./output)")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-browser", action="store_true")

@@ -65,8 +65,24 @@
     $('#sizeEst').textContent = d
       ? `≈ ${fmtBytes(s.bitrate * 1e6 / 8 * d)} на кожен файл (${fmtTime(d)})`
       : 'Для соцмереж 1080p достатньо 5–8 Мбіт/с';
+    updateOutNames();
     updateRenderBtn();
   }
+
+  // Mirrors clean_name() in resizer.py so the preview shows the real file names.
+  const cleanName = (n) => n.replace(/[<>:"/\\|?*\x00-\x1f]+/g, '_').replace(/\s+/g, ' ')
+    .replace(/^[ .]+|[ .]+$/g, '').slice(0, 150) || 'video';
+  function updateOutNames() {
+    const el = $('#outNames');
+    if (!el || !state.upload) return;
+    const n = cleanName($('#outName').value);
+    const esc = (t) => t.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    el.innerHTML = state.settings.formats.length
+      ? 'Файли: ' + state.settings.formats.map((f) => `<b>${f}_${esc(n)}.mp4</b>`).join(', ')
+      : 'Виберіть хоча б один формат';
+  }
+  $('#outName').addEventListener('input', updateOutNames);
+  $('#outName').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur(); });
 
   function updateRenderBtn() {
     const running = state.job && (state.job.status === 'running' || state.job.status === 'queued');
@@ -194,7 +210,8 @@
     drop.classList.add('compact');
     drop.hidden = true;
     $('#fileCard').hidden = false;
-    $('#fileName').textContent = up.name;
+    $('#outName').value = up.name.replace(/\.[^.]+$/, '');
+    updateOutNames();
     const tags = [
       `${i.width}×${i.height}`, fmtTime(i.duration), i.fps ? `${i.fps} fps` : null,
       (i.video_codec || '').toUpperCase(), fmtBytes(i.size),
@@ -303,7 +320,7 @@
     if (!state.upload) return;
     video.pause();
     $('#results').hidden = true;
-    const body = { id: state.upload.id, ...state.settings };
+    const body = { id: state.upload.id, name: cleanName($('#outName').value), ...state.settings };
     try {
       const r = await fetch('/api/render', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -379,12 +396,13 @@
       v.style.aspectRatio = `${o.width} / ${o.height}`;
       const foot = document.createElement('div');
       foot.className = 'result-foot';
-      foot.innerHTML = `<div class="result-info"><b>${o.label}</b>${o.width}×${o.height} · ${fmtBytes(o.size)}</div>`;
+      foot.innerHTML = `<div class="result-info"><b>${o.label}</b>${o.width}×${o.height} · ${fmtBytes(o.size)}<div class="result-file"></div></div>`;
       const a = document.createElement('a');
       a.className = 'btn btn-sm btn-dl';
       a.href = o.url + '?download=1';
       a.download = o.file;
       a.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0 4.5-4.5M12 15l-4.5-4.5"/><path d="M5 19h14"/></svg>Завантажити';
+      foot.querySelector('.result-file').textContent = o.file;
       foot.append(a);
       el.append(v, foot);
       grid.append(el);
