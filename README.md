@@ -7,21 +7,29 @@ NVIDIA NVENC, Intel Quick Sync, AMD AMF, VAAPI). На macOS інтерфейс �
 
 ## macOS — застосунок Resizer.app
 
-1. Скачайте папку: `git clone https://github.com/djwewer/resizer.git`
-   (або на GitHub **Code → Download ZIP** і розпакуйте).
-2. Двічі клікніть **Resizer.app** у папці `resizer`.
+1. Скачайте **Resizer.dmg** зі сторінки [Releases](https://github.com/djwewer/resizer/releases/latest).
+2. Відкрийте його і перетягніть **Resizer** у папку **Applications**
+   (якщо там уже є старий Resizer — натисніть «Замінити»).
+3. Запустіть Resizer з «Програм», Launchpad або Spotlight.
    - Перший запуск: якщо немає ffmpeg — застосунок запропонує встановити його сам (відкриється Термінал, один раз).
    - Якщо macOS пише «неможливо перевірити розробника»: **Системні параметри → Конфіденційність і безпека → Все одно відкрити**
-     (або в Терміналі: `xattr -dr com.apple.quarantine ~/шлях/до/resizer`). Це потрібно лише один раз.
-3. Відкриється вікно Resizer — перетягніть одне або кілька відео, вони стануть у **чергу**.
+     (або в Терміналі: `xattr -dr com.apple.quarantine /Applications/Resizer.app`). Це потрібно лише один раз.
+4. Відкриється вікно Resizer — перетягніть одне або кілька відео, вони стануть у **чергу**.
    Налаштуйте, натисніть **Рендерити все** — відео рендеряться по одному.
 
+Без DMG: `git clone https://github.com/djwewer/resizer.git` (або **Code → Download ZIP**) і запустіть `Resizer.app` з папки.
+
 - Готові файли: **~/Movies/Resizer** (кнопка «Відкрити папку» в інтерфейсі).
-- Застосунок самодостатній: його можна перенести в «Програми» і закріпити в Dock. Решта папки для Mac не потрібна.
 - Terminal не потрібен: сервер працює у фоні й зупиняється разом із вікном (якщо йде рендер — апка перепитає).
-- Лог: `~/Library/Logs/Resizer.log`. Оновлення: скачати новий Resizer.app і замінити старий.
-- Вікно — Swift-застосунок, джерело в `macos/ResizerApp.swift`. Після змін: `macos/build.sh`
+- Лог: `~/Library/Logs/Resizer.log`. Оновлення: скачати новий DMG і замінити Resizer у «Програмах».
+
+### Для розробки (macOS)
+
+- Вікно — Swift-застосунок, джерело в `macos/ResizerApp.swift`. Після змін у `Resizer.app` (у тому числі
+  Python/веб-файлах) запустіть `macos/build.sh` — він перезбирає й перепідписує застосунок
   (потрібні Xcode Command Line Tools); зібраний бінарник комітиться в репозиторій.
+- DMG: `macos/make-dmg.sh` → `dist/Resizer.dmg` (не комітиться, викладається в Releases).
+  Фон вікна — `macos/dmg/background.html`, після змін: `macos/dmg/render-background.sh`.
 
 ## Windows / Linux
 

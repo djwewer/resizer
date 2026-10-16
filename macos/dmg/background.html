@@ -1,0 +1,44 @@
+<!doctype html>
+<!-- Source of background.tiff for the DMG window (640x420). Rebuild: macos/dmg/render-background.sh
+     Icons are placed by make-dmg.sh at (170, 205) and (470, 205); keep the label areas mid-tone so
+     Finder's black (light mode) and white (dark mode) labels both stay readable. -->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; width: 640px; height: 420px; overflow: hidden; }
+  body {
+    font-family: -apple-system, "SF Pro Display", "Helvetica Neue", sans-serif; color: #fff;
+    background:
+      radial-gradient(circle at 92% 6%, rgba(34, 211, 238, .75), transparent 42%),
+      radial-gradient(circle at 4% 104%, rgba(236, 72, 153, .45), transparent 40%),
+      linear-gradient(135deg, #7c3aed 0%, #6366f1 55%, #4f46e5 100%);
+    position: relative;
+  }
+  body::after {
+    content: ""; position: absolute; inset: 0;
+    background-image: radial-gradient(rgba(255, 255, 255, .09) 1px, transparent 1px);
+    background-size: 22px 22px;
+  }
+  h1 {
+    position: absolute; top: 42px; left: 0; right: 0; margin: 0; text-align: center;
+    font-size: 23px; font-weight: 600; letter-spacing: -.01em; text-shadow: 0 2px 12px rgba(30, 10, 80, .35);
+  }
+  .arrow { position: absolute; left: 262px; top: 181px; width: 116px; height: 48px; }
+  .hint {
+    position: absolute; bottom: 44px; left: 40px; right: 40px; text-align: center;
+    font-size: 12px; line-height: 1.45; color: rgba(255, 255, 255, .82);
+  }
+  .hint b { font-weight: 600; color: #fff; }
+</style>
+</head>
+<body>
+  <h1>Перетягніть Resizer у Applications</h1>
+  <svg class="arrow" viewBox="0 0 116 48" fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M6 24h94" stroke-width="5" stroke-dasharray="1 12" opacity=".9"/>
+    <path d="M88 10l16 14-16 14" stroke-width="5"/>
+  </svg>
+  <div class="hint">Перший запуск: якщо macOS не відкриває застосунок —<br>
+    <b>Системні параметри → Конфіденційність і безпека → Все одно відкрити</b></div>
+</body>
+</html>
