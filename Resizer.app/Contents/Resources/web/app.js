@@ -6,13 +6,19 @@
   // Must match BG_WORK_WIDTH in resizer.py — used to mirror ffmpeg's blur on the canvas.
   const BG_WORK_WIDTH = 160;
   const STORE_KEY = 'resizer.settings.v1';
+  // Set by the macOS app window (Resizer.app); in a browser it is undefined.
+  const NATIVE = !!window.RESIZER_NATIVE;
+  const ASPECTS = { '16x9': [16, 9], '1x1': [1, 1], '4x5': [4, 5] };
+  const ACTIVE = ['queued', 'running'];
 
   const state = {
-    upload: null,      // {id, name, info, url}
-    job: null,
+    items: [],         // queue: {key, file, name, state, pct, upload, job, el}
+    sel: null,         // selected queue item (preview + results)
+    batch: [],         // items of the current render run, for the overall progress
     pollTimer: null,
+    outputDir: '',
     settings: {
-      bitrate: 5, height: 1080, formats: ['16x9', '1x1'], blur: 50, dim: 30,
+      bitrate: 5, height: 1080, formats: ['16x9', '1x1', '4x5'], blur: 50, dim: 30,
       codec: 'h264', encoder: 'auto', hw_decode: true,
     },
     encoders: null,
@@ -32,6 +38,7 @@
     const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = s % 60;
     return h ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}` : `${m}:${String(sec).padStart(2, '0')}`;
   };
+  const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const toast = (msg) => {
     const t = $('#toast');
     t.textContent = msg; t.hidden = false;
@@ -40,6 +47,11 @@
   const setRangeFill = (el) => {
     const p = (el.value - el.min) / (el.max - el.min) * 100;
     el.style.setProperty('--p', p + '%');
+  };
+  // Mirrors out_size() in resizer.py: the resolution is the short side of the frame.
+  const outSize = (fmt, res) => {
+    const [aw, ah] = ASPECTS[fmt];
+    return aw < ah ? [res, Math.round(res * ah / aw / 2) * 2] : [Math.round(res * aw / ah / 2) * 2, res];
   };
 
   function applySettingsToUI() {
@@ -57,11 +69,10 @@
 
   function updateDerived() {
     const s = state.settings;
-    const h = s.height, w = Math.round(h * 16 / 9 / 2) * 2;
-    $('#dim169').textContent = `${w}×${h}`;
-    $('#dim11').textContent = `${h}×${h}`;
+    const ids = { '16x9': '#dim169', '1x1': '#dim11', '4x5': '#dim45' };
+    for (const [fmt, id] of Object.entries(ids)) $(id).textContent = outSize(fmt, s.height).join('×');
     $$('.stage').forEach((st) => st.classList.toggle('off', !s.formats.includes(st.dataset.fmt)));
-    const d = state.upload?.info?.duration;
+    const d = state.sel?.upload?.info?.duration;
     $('#sizeEst').textContent = d
       ? `≈ ${fmtBytes(s.bitrate * 1e6 / 8 * d)} на кожен файл (${fmtTime(d)})`
       : 'Для соцмереж 1080p достатньо 5–8 Мбіт/с';
@@ -74,19 +85,23 @@
     .replace(/^[ .]+|[ .]+$/g, '').slice(0, 150) || 'video';
   function updateOutNames() {
     const el = $('#outNames');
-    if (!el || !state.upload) return;
-    const n = cleanName($('#outName').value);
-    const esc = (t) => t.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const it = state.sel;
+    el.hidden = !it;
+    if (!it) return;
+    const n = cleanName(it.name);
     el.innerHTML = state.settings.formats.length
       ? 'Файли: ' + state.settings.formats.map((f) => `<b>${f}_${esc(n)}.mp4</b>`).join(', ')
       : 'Виберіть хоча б один формат';
   }
-  $('#outName').addEventListener('input', updateOutNames);
-  $('#outName').addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.blur(); });
+
+  const itemStatus = (it) => it.job ? it.job.status : it.state;
+  const renderable = (it) => it.upload && !it.job;
 
   function updateRenderBtn() {
-    const running = state.job && (state.job.status === 'running' || state.job.status === 'queued');
-    $('#renderBtn').disabled = !state.upload || !state.settings.formats.length || running;
+    const n = state.items.filter(renderable).length;
+    const active = state.items.some((it) => ACTIVE.includes(itemStatus(it)));
+    $('#renderBtn').disabled = !n || !state.settings.formats.length;
+    $('#renderLbl').textContent = n ? `Рендерити все (${n})` : active ? 'Рендеринг…' : 'Рендерити все';
   }
 
   // bitrate
@@ -139,6 +154,7 @@
       const r = await fetch('/api/info');
       const info = await r.json();
       state.encoders = info.encoders;
+      state.outputDir = info.output_dir || '';
       fillEncoderSelect();
       const best = (info.encoders.h264 || [])[0];
       const chip = $('#encChip');
@@ -154,7 +170,7 @@
     }
   }
 
-  // ---------------------------------------------------------------- upload
+  // ---------------------------------------------------------------- add files
   const drop = $('#drop');
   const fileInput = $('#fileInput');
   ['dragenter', 'dragover'].forEach((ev) => document.addEventListener(ev, (e) => {
@@ -164,78 +180,191 @@
     e.preventDefault();
     if (ev === 'drop' || e.target === document.documentElement || !e.relatedTarget) drop.classList.remove('over');
   }));
-  document.addEventListener('drop', (e) => {
-    const f = e.dataTransfer?.files?.[0];
-    if (f) upload(f);
-  });
-  fileInput.addEventListener('change', () => { if (fileInput.files[0]) upload(fileInput.files[0]); fileInput.value = ''; });
-  $('#changeFile').addEventListener('click', () => fileInput.click());
+  document.addEventListener('drop', (e) => addFiles(e.dataTransfer?.files || []));
+  fileInput.addEventListener('change', () => { addFiles(fileInput.files); fileInput.value = ''; });
 
-  let uploading = false;
-  function upload(file) {
-    if (uploading) return;
-    if (state.job && state.job.status === 'running') { toast('Зачекайте завершення рендеру або скасуйте його'); return; }
-    uploading = true;
-    const prog = $('#upProg');
-    drop.hidden = false; drop.classList.remove('compact');
-    prog.hidden = false;
-    const bar = prog.querySelector('.bar span');
-    const txt = prog.querySelector('.up-text');
-    bar.style.width = '0%';
-    txt.textContent = `${file.name} · ${fmtBytes(file.size)}`;
-
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/upload');
-    xhr.setRequestHeader('X-Filename', encodeURIComponent(file.name));
-    xhr.upload.onprogress = (e) => {
-      if (!e.lengthComputable) return;
-      const p = e.loaded / e.total;
-      bar.style.width = (p * 100).toFixed(1) + '%';
-      txt.textContent = p < 1 ? `Завантаження ${(p * 100).toFixed(0)}% · ${fmtBytes(e.loaded)} з ${fmtBytes(e.total)}` : 'Аналізую відео…';
-    };
-    xhr.onload = () => {
-      uploading = false; prog.hidden = true;
-      let res = {};
-      try { res = JSON.parse(xhr.responseText); } catch (_) {}
-      if (xhr.status !== 200) { toast(res.error || 'Не вдалося завантажити файл'); return; }
-      onUploaded(res);
-    };
-    xhr.onerror = () => { uploading = false; prog.hidden = true; toast('Помилка завантаження'); };
-    xhr.send(file);
+  let seq = 0;
+  function addFiles(files) {
+    for (const f of files) {
+      state.items.push({
+        key: ++seq, file: f, name: f.name.replace(/\.[^.]+$/, ''),
+        state: 'waiting', pct: 0, upload: null, job: null, el: null,
+      });
+    }
+    if (!files.length) return;
+    renderQueue();
+    pumpUploads();
   }
 
-  function onUploaded(up) {
-    state.upload = up;
-    const i = up.info;
-    drop.classList.add('compact');
-    drop.hidden = true;
-    $('#fileCard').hidden = false;
-    $('#outName').value = up.name.replace(/\.[^.]+$/, '');
-    updateOutNames();
-    const tags = [
-      `${i.width}×${i.height}`, fmtTime(i.duration), i.fps ? `${i.fps} fps` : null,
-      (i.video_codec || '').toUpperCase(), fmtBytes(i.size),
-    ].filter(Boolean).map((t) => `<span class="tag">${t}</span>`);
-    if (i.width > i.height) tags.push('<span class="tag warn">Не вертикальне — буде вписане в кадр</span>');
-    $('#fileTags').innerHTML = tags.join('');
-    $('#results').hidden = true;
-    $('#jobBox').hidden = true;
-    state.job = null;
-    setupPreview(up.url);
+  // Uploads go one at a time so the first video is ready to preview as soon as possible.
+  let uploading = null;
+  function pumpUploads() {
+    if (uploading) return;
+    const it = state.items.find((x) => x.state === 'waiting');
+    if (!it) return;
+    uploading = it;
+    it.state = 'uploading';
+    const xhr = new XMLHttpRequest();
+    it.xhr = xhr;
+    xhr.open('POST', '/api/upload');
+    xhr.setRequestHeader('X-Filename', encodeURIComponent(it.file.name));
+    xhr.upload.onprogress = (e) => {
+      if (!e.lengthComputable) return;
+      it.pct = e.loaded / e.total;
+      updateRow(it);
+    };
+    const done = (error, res) => {
+      uploading = null;
+      it.xhr = null;
+      if (error) {
+        toast(`${it.file.name}: ${error}`);
+        it.state = 'failed';
+        removeItem(it);
+      } else {
+        it.upload = res; it.state = 'ready'; it.file = null;
+        if (!state.sel || state.sel === it) selectItem(it);
+        updateAll();
+      }
+      pumpUploads();
+    };
+    xhr.onload = () => {
+      let res = {};
+      try { res = JSON.parse(xhr.responseText); } catch (_) {}
+      if (xhr.status !== 200) done(res.error || 'не вдалося завантажити файл');
+      else done(null, res);
+    };
+    xhr.onerror = () => done('помилка завантаження');
+    xhr.onabort = () => { uploading = null; it.xhr = null; pumpUploads(); };
+    updateRow(it);
+    xhr.send(it.file);
+  }
+
+  // ---------------------------------------------------------------- queue list
+  const PENCIL = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/></svg>';
+
+  function buildRow(it) {
+    const li = document.createElement('li');
+    li.className = 'q-item';
+    li.innerHTML = `<div class="q-meta">
+        <label class="name-edit"><input type="text" spellcheck="false" autocomplete="off" aria-label="Назва файлів" placeholder="Назва файлу">${PENCIL}</label>
+        <div class="file-tags"></div>
+        <div class="bar"><span></span></div>
+      </div>
+      <span class="q-status"></span>
+      <button class="icon-btn q-retry" type="button" title="Рендерити ще раз" aria-label="Рендерити ще раз">↻</button>
+      <button class="icon-btn q-remove" type="button">✕</button>`;
+    const input = li.querySelector('input');
+    input.value = it.name;
+    input.addEventListener('input', () => { it.name = input.value; if (state.sel === it) updateOutNames(); });
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') input.blur(); });
+    li.addEventListener('click', (e) => { if (!e.target.closest('button')) selectItem(it); });
+    const retry = li.querySelector('.q-retry');
+    retry.addEventListener('click', () => {
+      it.job = null;
+      if (state.sel === it) selectItem(it);
+      updateAll();
+    });
+    const remove = li.querySelector('.q-remove');
+    remove.addEventListener('click', () => removeItem(it));
+    it.el = {
+      li, input, retry, remove, tags: li.querySelector('.file-tags'), bar: li.querySelector('.bar'),
+      fill: li.querySelector('.bar span'), status: li.querySelector('.q-status'), tagged: false,
+    };
+  }
+
+  function renderQueue() {
+    const list = $('#queueList');
+    for (const it of state.items) {
+      if (!it.el) buildRow(it);
+      list.append(it.el.li);       // keeps the order, moves nothing that is already in place
+    }
+    $('#queueWrap').hidden = !state.items.length;
+    drop.classList.toggle('compact', state.items.length > 0);
+    $('#dropTitle').textContent = state.items.length ? 'Додати ще відео' : 'Перетягніть вертикальні відео';
+    updateAll();
+  }
+
+  function updateRow(it) {
+    const el = it.el;
+    if (!el) return;
+    const st = itemStatus(it);
+    const job = it.job;
+    el.li.classList.toggle('sel', state.sel === it);
+    const text = {
+      waiting: 'очікує', uploading: `завантаження ${Math.floor(it.pct * 100)}%`, ready: 'готове до рендеру',
+      queued: 'в черзі', running: job ? `${Math.floor(job.progress * 100)}% · ${fmtTime(job.eta)}` : '',
+      done: job ? `✓ готово за ${fmtTime(job.elapsed)}` : '', error: 'помилка', cancelled: 'скасовано',
+    }[st] || st;
+    el.status.textContent = text;
+    el.status.className = 'q-status' + (st === 'done' ? ' done' : st === 'error' ? ' error' : '');
+    el.bar.hidden = !(st === 'uploading' || st === 'running');
+    el.fill.style.width = ((st === 'uploading' ? it.pct : job?.progress || 0) * 100).toFixed(1) + '%';
+    el.input.disabled = !!job;     // the name is used when the render starts
+    el.retry.hidden = !(job && !ACTIVE.includes(st));
+    const cancel = ACTIVE.includes(st);
+    el.remove.title = cancel ? 'Скасувати рендер' : 'Прибрати з черги';
+    el.remove.setAttribute('aria-label', el.remove.title);
+    if (it.upload && !el.tagged) {
+      const i = it.upload.info;
+      const tags = [
+        `${i.width}×${i.height}`, fmtTime(i.duration), i.fps ? `${i.fps} fps` : null,
+        (i.video_codec || '').toUpperCase(), fmtBytes(i.size),
+      ].filter(Boolean).map((t) => `<span class="tag">${esc(t)}</span>`);
+      if (i.width > i.height) tags.push('<span class="tag warn">Не вертикальне — буде вписане в кадр</span>');
+      el.tags.innerHTML = tags.join('');
+      el.tagged = true;
+    }
+  }
+
+  async function removeItem(it) {
+    const st = itemStatus(it);
+    if (ACTIVE.includes(st)) {
+      // First click cancels the render; the item stays as "cancelled" and can be removed then.
+      await fetch(`/api/jobs/${it.job.id}/cancel`, { method: 'POST' }).catch(() => {});
+      poll();
+      return;
+    }
+    if (it.xhr) it.xhr.abort();
+    if (it.upload) fetch(`/api/uploads/${it.upload.id}/delete`, { method: 'POST' }).catch(() => {});
+    const idx = state.items.indexOf(it);
+    if (idx < 0) return;
+    state.items.splice(idx, 1);
+    state.batch = state.batch.filter((x) => x !== it);
+    it.el?.li.remove();
+    if (state.sel === it) selectItem(state.items[idx] || state.items[idx - 1] || null);
+    renderQueue();
+  }
+
+  function selectItem(it) {
+    state.sel = it;
+    if (it?.upload) setupPreview(it.upload.url);
+    else { $('#previewWrap').hidden = true; video.pause(); }
+    if (it?.job?.status === 'done') showResults(it);
+    else $('#results').hidden = true;
+    updateAll();
     updateDerived();
   }
 
   // ---------------------------------------------------------------- preview
   const video = $('#srcVideo');
-  const canvases = { '16x9': $('#cv169'), '1x1': $('#cv11') };
+  const canvases = { '16x9': $('#cv169'), '1x1': $('#cv11'), '4x5': $('#cv45') };
   const ctxs = {};
   let raf = 0;
+  let previewUrl = '';
+
+  // Older WebKit (Safari < 18, i.e. the app window on older macOS) has no ctx.filter.
+  const CAN_FILTER = (() => {
+    try { const c = document.createElement('canvas').getContext('2d'); c.filter = 'blur(1px)'; return c.filter === 'blur(1px)'; }
+    catch (_) { return false; }
+  })();
+  const tiny = document.createElement('canvas');
 
   function sizeCanvases() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     for (const [fmt, cv] of Object.entries(canvases)) {
+      const [aw, ah] = ASPECTS[fmt];
       const w = Math.max(2, Math.round(cv.clientWidth * dpr));
-      const h = fmt === '1x1' ? w : Math.round(w * 9 / 16);
+      const h = Math.round(w * ah / aw);
       if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
       ctxs[fmt] = cv.getContext('2d');
     }
@@ -245,6 +374,9 @@
 
   function setupPreview(url) {
     $('#previewWrap').hidden = false;
+    if (url === previewUrl) { requestAnimationFrame(sizeCanvases); return; }
+    previewUrl = url;
+    video.pause();
     video.src = url;
     video.currentTime = 0;
     video.addEventListener('loadeddata', () => { sizeCanvases(); drawOnce(); }, { once: true });
@@ -262,23 +394,35 @@
     const cover = Math.max(W / vw, H / vh);
     const bw = vw * cover, bh = vh * cover;
     const radius = 1 + Math.round(s.blur / 100 * 11);
-    const boxSigma = Math.sqrt(((2 * radius + 1) ** 2 - 1) / 12) * Math.SQRT2;
-    const sigma = boxSigma * (bw / BG_WORK_WIDTH);
-    const pad = sigma * 2;
     ctx.save();
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, W, H);
-    ctx.filter = `blur(${sigma.toFixed(1)}px) brightness(${1 - s.dim / 100})`;
-    ctx.drawImage(video, (W - bw) / 2 - pad, (H - bh) / 2 - pad, bw + pad * 2, bh + pad * 2);
+    if (CAN_FILTER) {
+      const boxSigma = Math.sqrt(((2 * radius + 1) ** 2 - 1) / 12) * Math.SQRT2;
+      const sigma = boxSigma * (bw / BG_WORK_WIDTH);
+      const pad = sigma * 2;
+      ctx.filter = `blur(${sigma.toFixed(1)}px) brightness(${1 - s.dim / 100})`;
+      ctx.drawImage(video, (W - bw) / 2 - pad, (H - bh) / 2 - pad, bw + pad * 2, bh + pad * 2);
+    } else {
+      // Blur by drawing the frame tiny and scaling it back up, then darken.
+      const tw = Math.max(2, Math.round(BG_WORK_WIDTH / (1 + radius)));
+      const th = Math.max(2, Math.round(tw * bh / bw));
+      tiny.width = tw; tiny.height = th;
+      tiny.getContext('2d').drawImage(video, 0, 0, tw, th);
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(tiny, (W - bw) / 2, (H - bh) / 2, bw, bh);
+      ctx.fillStyle = `rgba(0,0,0,${s.dim / 100})`;
+      ctx.fillRect(0, 0, W, H);
+    }
     ctx.restore();
 
-    // Foreground: full height, centered.
+    // Foreground: fitted, centered.
     const fit = Math.min(W / vw, H / vh);
     const fw = vw * fit, fh = vh * fit;
     ctx.drawImage(video, (W - fw) / 2, (H - fh) / 2, fw, fh);
   }
 
-  function drawOnce() { draw('16x9'); draw('1x1'); updateTime(); }
+  function drawOnce() { Object.keys(canvases).forEach(draw); updateTime(); }
   function loop() {
     drawOnce();
     raf = video.paused ? 0 : requestAnimationFrame(loop);
@@ -317,34 +461,49 @@
 
   // ---------------------------------------------------------------- render
   $('#renderBtn').addEventListener('click', async () => {
-    if (!state.upload) return;
+    const todo = state.items.filter(renderable);
+    if (!todo.length || !state.settings.formats.length) return;
     video.pause();
-    $('#results').hidden = true;
-    const body = { id: state.upload.id, name: cleanName($('#outName').value), ...state.settings };
-    try {
-      const r = await fetch('/api/render', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-      });
-      const job = await r.json();
-      if (!r.ok) { toast(job.error || 'Не вдалося запустити рендер'); return; }
-      showJob(job);
-      poll(job.id);
-    } catch (_) { toast('Сервер недоступний'); }
+    // A new run starts a new progress batch; items added during a run join it.
+    if (!state.batch.some((it) => ACTIVE.includes(itemStatus(it)))) state.batch = [];
+    $('#renderBtn').disabled = true;
+    for (const it of todo) {
+      const body = { id: it.upload.id, name: cleanName(it.name), ...state.settings };
+      try {
+        const r = await fetch('/api/render', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        });
+        const job = await r.json();
+        if (!r.ok) { toast(`${it.upload.name}: ${job.error || 'не вдалося запустити рендер'}`); continue; }
+        it.job = job;
+        state.batch.push(it);
+      } catch (_) { toast('Сервер недоступний'); break; }
+    }
+    updateAll();
+    poll();
   });
 
   $('#cancelBtn').addEventListener('click', async () => {
-    if (!state.job) return;
-    await fetch(`/api/jobs/${state.job.id}/cancel`, { method: 'POST' }).catch(() => {});
+    await fetch('/api/cancel-all', { method: 'POST' }).catch(() => {});
+    poll();
   });
 
-  function poll(id) {
+  function poll() {
     clearTimeout(state.pollTimer);
     const tick = async () => {
       try {
-        const r = await fetch(`/api/jobs/${id}`);
-        const job = await r.json();
-        showJob(job);
-        if (job.status === 'running' || job.status === 'queued') state.pollTimer = setTimeout(tick, 400);
+        const jobs = await (await fetch('/api/jobs')).json();
+        const byId = new Map(jobs.map((j) => [j.id, j]));
+        for (const it of state.items) {
+          if (!it.job) continue;
+          const prev = it.job.status;
+          const job = byId.get(it.job.id);
+          if (job) it.job = job;
+          else if (ACTIVE.includes(prev)) it.job = { ...it.job, status: 'error', error: 'Рендер втрачено: сервер перезапустився' };
+          if (it === state.sel && it.job.status === 'done' && prev !== 'done') showResults(it);
+        }
+        updateAll();
+        if (state.items.some((it) => ACTIVE.includes(itemStatus(it)))) state.pollTimer = setTimeout(tick, 500);
       } catch (_) { state.pollTimer = setTimeout(tick, 1500); }
     };
     tick();
@@ -358,35 +517,67 @@
     return id || '—';
   };
 
-  function showJob(job) {
-    const prev = state.job?.status;
-    state.job = job;
-    const box = $('#jobBox');
-    box.hidden = false;
-    box.classList.toggle('done', job.status === 'done');
-    const pct = job.progress * 100;
-    $('#jobBar').style.width = pct.toFixed(1) + '%';
-    $('#jobPct').textContent = Math.floor(pct) + '%';
-    $('#jobSpeed').textContent = job.speed ? job.speed.toFixed(1) + '×' : '—';
-    $('#jobEnc').textContent = encLabel(job.encoder);
-    const running = job.status === 'running' || job.status === 'queued';
-    $('#cancelBtn').hidden = !running;
-    $('#jobErr').hidden = job.status !== 'error';
-    const labels = {
-      queued: 'У черзі…', running: 'Рендеринг…', done: `Готово за ${fmtTime(job.elapsed)}`,
-      error: 'Помилка рендеру', cancelled: 'Скасовано',
-    };
-    $('#jobStatus').textContent = labels[job.status] || job.status;
-    $('#jobEta').textContent = running ? fmtTime(job.eta) : fmtTime(0);
-    if (job.status === 'error') $('#jobErr').textContent = job.error;
-    if (job.status === 'done' && prev !== 'done') showResults(job);
+  let wasBusy = false;
+  function updateAll() {
+    state.items.forEach(updateRow);
+    $('#queueHint').textContent = state.items.length ? `${state.items.length} відео` : '';
+    updateJobBox();
     updateRenderBtn();
+    const err = state.sel?.job?.status === 'error' ? state.sel.job.error : '';
+    $('#jobErr').hidden = !err;
+    $('#jobErr').textContent = err;
+    // Tell the macOS app window whether closing it would cancel a render.
+    const busy = state.items.some((it) => ACTIVE.includes(itemStatus(it)));
+    if (busy !== wasBusy) {
+      wasBusy = busy;
+      try { window.webkit?.messageHandlers?.busy?.postMessage(busy); } catch (_) {}
+    }
   }
 
-  function showResults(job) {
+  function updateJobBox() {
+    const box = $('#jobBox');
+    const b = state.batch;
+    box.hidden = !b.length;
+    if (!b.length) return;
+    const st = b.map(itemStatus);
+    const active = st.some((s) => ACTIVE.includes(s));
+    const finished = st.filter((s) => !ACTIVE.includes(s)).length;
+    const done = st.filter((s) => s === 'done').length;
+    const failed = st.filter((s) => s === 'error').length;
+    const running = b.find((it) => itemStatus(it) === 'running');
+    const progress = b.reduce((sum, it, i) => sum + (!ACTIVE.includes(st[i]) ? 1 : it.job.progress || 0), 0) / b.length;
+
+    box.classList.toggle('done', !active);
+    $('#jobBar').style.width = (progress * 100).toFixed(1) + '%';
+    $('#jobPct').textContent = Math.floor(progress * 100) + '%';
+    if (active) {
+      $('#jobStatus').textContent = b.length > 1 ? `Рендер ${Math.min(finished + 1, b.length)} з ${b.length}…` : 'Рендеринг…';
+    } else {
+      $('#jobStatus').textContent = `Готово ${done} з ${b.length}` + (failed ? ` · помилок: ${failed}` : '');
+    }
+    const speed = running?.job.speed || 0;
+    $('#jobSpeed').textContent = speed ? speed.toFixed(1) + '×' : '—';
+    // Time left = current file + the queued ones at the current speed.
+    let eta = active ? 0 : null;
+    if (running) eta = running.job.eta;
+    if (active && eta != null) {
+      const queued = b.filter((it) => itemStatus(it) === 'queued');
+      if (queued.length) eta = speed ? eta + queued.reduce((s, it) => s + (it.upload.info.duration || 0), 0) / speed : null;
+    }
+    $('#jobEta').textContent = fmtTime(eta);
+    const lastEnc = (running || [...b].reverse().find((it) => it.job?.encoder))?.job.encoder;
+    $('#jobEnc').textContent = encLabel(lastEnc);
+    $('#cancelBtn').hidden = !active;
+  }
+
+  function showResults(it) {
+    const job = it.job;
     const grid = $('#resultGrid');
     grid.innerHTML = '';
-    grid.classList.toggle('single', job.outputs.length === 1);
+    const single = job.outputs.length === 1;
+    grid.classList.toggle('single', single);
+    // Columns proportional to the aspect ratios, so all results line up at the same height.
+    grid.style.gridTemplateColumns = single ? '' : job.outputs.map((o) => `minmax(0, ${(o.width / o.height).toFixed(3)}fr)`).join(' ');
     for (const o of job.outputs) {
       const el = document.createElement('div');
       el.className = 'result';
@@ -397,19 +588,31 @@
       const foot = document.createElement('div');
       foot.className = 'result-foot';
       foot.innerHTML = `<div class="result-info"><b>${o.label}</b>${o.width}×${o.height} · ${fmtBytes(o.size)}<div class="result-file"></div></div>`;
-      const a = document.createElement('a');
-      a.className = 'btn btn-sm btn-dl';
-      a.href = o.url + '?download=1';
-      a.download = o.file;
-      a.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0 4.5-4.5M12 15l-4.5-4.5"/><path d="M5 19h14"/></svg>Завантажити';
       foot.querySelector('.result-file').textContent = o.file;
-      foot.append(a);
+      if (NATIVE) {
+        // Files are already saved in the output folder; a download makes no sense in the app window.
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn btn-sm btn-dl';
+        btn.textContent = 'Показати у Finder';
+        btn.addEventListener('click', () => fetch('/api/reveal', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: o.file }),
+        }));
+        foot.append(btn);
+      } else {
+        const a = document.createElement('a');
+        a.className = 'btn btn-sm btn-dl';
+        a.href = o.url + '?download=1';
+        a.download = o.file;
+        a.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0 4.5-4.5M12 15l-4.5-4.5"/><path d="M5 19h14"/></svg>Завантажити';
+        foot.append(a);
+      }
       el.append(v, foot);
       grid.append(el);
     }
-    $('#resultHint').textContent = `збережено в папці output · ${fmtTime(job.elapsed)}, ${encLabel(job.encoder)}`;
+    const folder = state.outputDir.split(/[\\/]/).filter(Boolean).pop() || 'output';
+    $('#resultHint').textContent = `збережено в папці ${folder} · ${fmtTime(job.elapsed)}, ${encLabel(job.encoder)}`;
     $('#results').hidden = false;
-    $('#results').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 
   $('#openFolder').addEventListener('click', () => fetch('/api/open-folder', { method: 'POST' }));

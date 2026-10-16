@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Resizer — vertical video -> 16:9 + 1:1 with a blurred background.
+Resizer — vertical video -> 16:9, 1:1 and 4:5 with a blurred background.
 
 Rendering is done by a native ffmpeg process (hardware encoders when available),
 the browser is only a UI running on localhost.
@@ -14,8 +14,10 @@ import argparse
 import json
 import mimetypes
 import os
+import queue
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -46,6 +48,7 @@ BG_WORK_WIDTH = 160
 FORMATS = {
     "16x9": {"label": "16:9", "aspect": (16, 9)},
     "1x1": {"label": "1:1", "aspect": (1, 1)},
+    "4x5": {"label": "4:5", "aspect": (4, 5)},
 }
 
 # Tried in this order for "auto". Name -> human label.
@@ -180,7 +183,7 @@ def probe(path: Path) -> dict:
 @dataclass
 class RenderOptions:
     bitrate: float = 5.0          # Mbps
-    height: int = 1080            # output height (square is height x height)
+    height: int = 1080            # short side of the output: 1080 -> 1920x1080, 1080x1080, 1080x1350
     formats: tuple[str, ...] = ("16x9", "1x1")
     blur: int = 50                # 0..100
     dim: int = 30                 # 0..80, % darker
@@ -206,9 +209,11 @@ class RenderOptions:
 
 
 def out_size(fmt: str, height: int) -> tuple[int, int]:
+    """`height` is the short side, so 4:5 at 1080 is 1080x1350 (the social media standard)."""
     aw, ah = FORMATS[fmt]["aspect"]
-    w = round(height * aw / ah / 2) * 2
-    return w, height
+    if aw < ah:
+        return height, round(height * ah / aw / 2) * 2
+    return round(height * aw / ah / 2) * 2, height
 
 
 def build_filter(info: dict, opts: RenderOptions, vaapi: bool) -> str:
@@ -232,16 +237,21 @@ def build_filter(info: dict, opts: RenderOptions, vaapi: bool) -> str:
         f"split={n}" + "".join(f"[bg{i}]" for i in range(n))
     )
 
-    vertical = src_w <= src_h
+    sizes = [out_size(fmt, opts.height) for fmt in opts.formats]
+    # Full-height foreground works when it fits the width of every output.
+    vertical = all(src_w * H <= src_h * W for W, H in sizes)
     if vertical:
-        # Full-height foreground, identical for every output -> scale once.
-        parts.append(f"[fgsrc]scale=-2:{opts.height}:flags=bicubic,split={n}"
-                     + "".join(f"[fg{i}]" for i in range(n)))
+        # Scale once per distinct output height (16:9 and 1:1 share one, 4:5 is taller).
+        heights = sorted({H for _, H in sizes})
+        parts.append(f"[fgsrc]split={len(heights)}" + "".join(f"[fs{k}]" for k in range(len(heights))))
+        for k, H in enumerate(heights):
+            idx = [i for i, (_, h) in enumerate(sizes) if h == H]
+            parts.append(f"[fs{k}]scale=-2:{H}:flags=bicubic,split={len(idx)}"
+                         + "".join(f"[fg{i}]" for i in idx))
     else:
         parts.append(f"[fgsrc]split={n}" + "".join(f"[fr{i}]" for i in range(n)))
 
-    for i, fmt in enumerate(opts.formats):
-        W, H = out_size(fmt, opts.height)
+    for i, (W, H) in enumerate(sizes):
         # Cover-crop the tiny background to the output aspect, then upscale.
         cw = BG_WORK_WIDTH
         ch = round(cw * H / W)
@@ -355,6 +365,23 @@ class Job:
 
 
 JOBS: dict[str, Job] = {}
+QUEUE: "queue.Queue[Job]" = queue.Queue()
+
+
+def queue_worker() -> None:
+    """Renders queued jobs one by one: one ffmpeg at a time keeps the GPU encoder fast."""
+    while True:
+        job = QUEUE.get()
+        if not job.cancelled:
+            run_job(job)
+
+
+def cancel_job(job: Job) -> None:
+    job.cancelled = True
+    if job.status == "queued":
+        job.status = "cancelled"
+    if job.proc and job.proc.poll() is None:
+        job.proc.terminate()
 
 
 def run_job(job: Job, on_progress=None) -> None:
@@ -423,7 +450,7 @@ def run_job(job: Job, on_progress=None) -> None:
                 "format": fmt, "label": FORMATS[fmt]["label"], "file": o.name,
                 "size": o.stat().st_size, "path": str(o),
                 "url": "/media/out/" + quote(o.name),
-                "width": out_size(fmt, job.opts.height)[0], "height": job.opts.height,
+                "width": out_size(fmt, job.opts.height)[0], "height": out_size(fmt, job.opts.height)[1],
             } for fmt, o in zip(job.opts.formats, outs)]
             job.status = "done"
             if on_progress:
@@ -547,6 +574,8 @@ class Handler(BaseHTTPRequestHandler):
                 "output_dir": str(OUTPUT_DIR),
                 "ffmpeg": FFMPEG,
             })
+        if p == "/api/jobs":
+            return self.send_json([j.public() for j in JOBS.values()])
         if p.startswith("/api/jobs/"):
             job = JOBS.get(p.rsplit("/", 1)[-1])
             return self.send_json(job.public() if job else {"error": "not found"}, 200 if job else 404)
@@ -573,10 +602,23 @@ class Handler(BaseHTTPRequestHandler):
         if p.startswith("/api/jobs/") and p.endswith("/cancel"):
             job = JOBS.get(p.split("/")[3])
             if job:
-                job.cancelled = True
-                if job.proc and job.proc.poll() is None:
-                    job.proc.terminate()
+                cancel_job(job)
             return self.send_json({"ok": bool(job)})
+        if p == "/api/cancel-all":
+            for job in JOBS.values():
+                if job.status in ("queued", "running"):
+                    cancel_job(job)
+            # Wait until ffmpeg has stopped and unfinished files are deleted (the app quits next).
+            deadline = time.time() + 5
+            while any(j.status == "running" for j in JOBS.values()) and time.time() < deadline:
+                time.sleep(0.1)
+            return self.send_json({"ok": True})
+        if p.startswith("/api/uploads/") and p.endswith("/delete"):
+            return self.handle_delete_upload(p.split("/")[3])
+        if p == "/api/reveal":
+            target = OUTPUT_DIR / Path(str(self.read_json().get("file") or "")).name
+            reveal_in_file_manager(target) if target.is_file() else open_in_file_manager(OUTPUT_DIR)
+            return self.send_json({"ok": True})
         if p == "/api/open-folder":
             OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
             open_in_file_manager(OUTPUT_DIR)
@@ -610,6 +652,16 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json({"id": fid, "name": name, "info": info,
                                "url": f"/media/upload/{fid}"})
 
+    def handle_delete_upload(self, fid: str):
+        up = UPLOADS.get(fid)
+        if not up:
+            return self.send_json({"ok": False}, 404)
+        if any(str(j.src) == up["path"] and j.status in ("queued", "running") for j in JOBS.values()):
+            return self.send_json({"error": "Файл рендериться, спершу скасуйте рендер"}, 409)
+        del UPLOADS[fid]
+        Path(up["path"]).unlink(missing_ok=True)
+        return self.send_json({"ok": True})
+
     def handle_render(self):
         body = self.read_json()
         up = UPLOADS.get(body.get("id", ""))
@@ -619,7 +671,7 @@ class Handler(BaseHTTPRequestHandler):
         job = Job(id=uuid.uuid4().hex[:12], src=Path(up["path"]), name=up["name"],
                   info=up["info"], opts=opts, out_name=str(body.get("name") or ""))
         JOBS[job.id] = job
-        threading.Thread(target=run_job, args=(job,), daemon=True).start()
+        QUEUE.put(job)
         return self.send_json(job.public())
 
 
@@ -635,9 +687,23 @@ def open_in_file_manager(path: Path) -> None:
         pass
 
 
+def reveal_in_file_manager(path: Path) -> None:
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", "-R", str(path)])
+    else:
+        open_in_file_manager(path.parent)
+
+
+def _stop_on_sigterm(*_):
+    # Resizer.app sends SIGTERM when its window closes: shut down like Ctrl+C so ffmpeg stops too.
+    raise KeyboardInterrupt
+
+
 def serve(port: int, open_browser: bool, idle_exit: int = 0) -> None:
     shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
+    signal.signal(signal.SIGTERM, _stop_on_sigterm)
     threading.Thread(target=detect_encoders, daemon=True).start()
+    threading.Thread(target=queue_worker, daemon=True).start()
     httpd = None
     for p in range(port, port + 20):
         try:
@@ -649,7 +715,8 @@ def serve(port: int, open_browser: bool, idle_exit: int = 0) -> None:
     if not httpd:
         sys.exit("Не вдалося відкрити порт")
     url = f"http://127.0.0.1:{port}"
-    print(f"\n  Resizer працює: {url}\n  Готові файли:   {OUTPUT_DIR}\n  Зупинити:       Ctrl+C\n")
+    # launch.sh reads the URL from the log: the port may differ if 8765 is taken.
+    print(f"\n  Resizer працює: {url}\n  Готові файли:   {OUTPUT_DIR}\n  Зупинити:       Ctrl+C\n", flush=True)
     if open_browser:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
     if idle_exit > 0:
@@ -742,12 +809,12 @@ def cli(args) -> None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Вертикальне відео → 16:9 і 1:1 з розмитим фоном")
+    ap = argparse.ArgumentParser(description="Вертикальне відео → 16:9, 1:1 і 4:5 з розмитим фоном")
     ap.add_argument("inputs", nargs="*", help="відеофайли (без них запускається інтерфейс)")
     ap.add_argument("-b", "--bitrate", type=float, default=5.0, help="бітрейт, Мбіт/с (5)")
     ap.add_argument("-r", "--res", type=int, default=1080, choices=[720, 1080, 1440, 2160],
-                    help="висота виходу (1080)")
-    ap.add_argument("-f", "--formats", default="16x9,1x1", help="16x9,1x1")
+                    help="коротка сторона виходу (1080): 1920×1080, 1080×1080, 1080×1350")
+    ap.add_argument("-f", "--formats", default="16x9,1x1", help="16x9,1x1,4x5")
     ap.add_argument("--blur", type=int, default=50, help="сила блюру 0-100 (50)")
     ap.add_argument("--dim", type=int, default=30, help="затемнення фону 0-80%% (30)")
     ap.add_argument("--codec", choices=list(ENCODERS), default="h264")
