@@ -352,13 +352,10 @@
   let raf = 0;
   let previewUrl = '';
 
-  // Older WebKit (Safari < 18, i.e. the app window on older macOS) has no ctx.filter.
-  const CAN_FILTER = (() => {
-    try { const c = document.createElement('canvas').getContext('2d'); c.filter = 'blur(1px)'; return c.filter === 'blur(1px)'; }
-    catch (_) { return false; }
-  })();
+  // Blurred background, computed once per frame for all formats. Done by hand instead of
+  // ctx.filter because WebKit (the macOS app window) accepts ctx.filter but ignores it.
   const tiny = document.createElement('canvas');
-
+  const tinyCtx = tiny.getContext('2d', { willReadFrequently: true });
   function sizeCanvases() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     for (const [fmt, cv] of Object.entries(canvases)) {
@@ -384,37 +381,53 @@
     setPlaying(false);
   }
 
-  function draw(fmt) {
+  // Box blur (radius r, `passes` times) over RGBA pixels, rows then columns — like ffmpeg's boxblur.
+  function boxBlur(px, w, h, r, passes) {
+    const tmp = new Uint8ClampedArray(px.length);
+    const line = (src, dst, n, start, step) => {
+      const win = 2 * r + 1;
+      for (let c = 0; c < 3; c++) {
+        let sum = 0;
+        for (let k = -r; k <= r; k++) sum += src[start + Math.min(n - 1, Math.max(0, k)) * step + c];
+        for (let i = 0; i < n; i++) {
+          dst[start + i * step + c] = sum / win;
+          sum += src[start + Math.min(n - 1, i + r + 1) * step + c] - src[start + Math.max(0, i - r) * step + c];
+        }
+      }
+    };
+    for (let p = 0; p < passes; p++) {
+      for (let y = 0; y < h; y++) line(px, tmp, w, y * w * 4, 4);
+      for (let x = 0; x < w; x++) line(tmp, px, h, x * 4, w * 4);
+    }
+  }
+
+  // Mirrors the ffmpeg graph: shrink to BG_WORK_WIDTH, blur, darken; draw() then crops and upscales.
+  function blurredBackground() {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const w = BG_WORK_WIDTH, h = Math.max(2, Math.round(w * vh / vw / 2) * 2);
+    if (tiny.width !== w || tiny.height !== h) { tiny.width = w; tiny.height = h; }
+    tinyCtx.drawImage(video, 0, 0, w, h);
+    const img = tinyCtx.getImageData(0, 0, w, h);
+    const s = state.settings;
+    boxBlur(img.data, w, h, 1 + Math.round(s.blur / 100 * 11), 2);
+    const level = 1 - s.dim / 100;
+    const px = img.data;
+    for (let i = 0; i < px.length; i += 4) { px[i] *= level; px[i + 1] *= level; px[i + 2] *= level; }
+    tinyCtx.putImageData(img, 0, 0);
+    return { w, h };
+  }
+
+  function draw(fmt, bg) {
     const ctx = ctxs[fmt]; const cv = canvases[fmt];
     if (!ctx || !video.videoWidth) return;
     const W = cv.width, H = cv.height, vw = video.videoWidth, vh = video.videoHeight;
-    const s = state.settings;
 
-    // Background: cover-scaled, blurred + darkened (mirrors the ffmpeg graph).
-    const cover = Math.max(W / vw, H / vh);
-    const bw = vw * cover, bh = vh * cover;
-    const radius = 1 + Math.round(s.blur / 100 * 11);
-    ctx.save();
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, W, H);
-    if (CAN_FILTER) {
-      const boxSigma = Math.sqrt(((2 * radius + 1) ** 2 - 1) / 12) * Math.SQRT2;
-      const sigma = boxSigma * (bw / BG_WORK_WIDTH);
-      const pad = sigma * 2;
-      ctx.filter = `blur(${sigma.toFixed(1)}px) brightness(${1 - s.dim / 100})`;
-      ctx.drawImage(video, (W - bw) / 2 - pad, (H - bh) / 2 - pad, bw + pad * 2, bh + pad * 2);
-    } else {
-      // Blur by drawing the frame tiny and scaling it back up, then darken.
-      const tw = Math.max(2, Math.round(BG_WORK_WIDTH / (1 + radius)));
-      const th = Math.max(2, Math.round(tw * bh / bw));
-      tiny.width = tw; tiny.height = th;
-      tiny.getContext('2d').drawImage(video, 0, 0, tw, th);
-      ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(tiny, (W - bw) / 2, (H - bh) / 2, bw, bh);
-      ctx.fillStyle = `rgba(0,0,0,${s.dim / 100})`;
-      ctx.fillRect(0, 0, W, H);
-    }
-    ctx.restore();
+    // Background: cover-crop the blurred tiny frame to the output aspect, then upscale.
+    let cw = bg.w, ch = Math.round(cw * H / W);
+    if (ch > bg.h) { ch = bg.h; cw = Math.round(ch * W / H); }
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(tiny, (bg.w - cw) / 2, (bg.h - ch) / 2, cw, ch, 0, 0, W, H);
 
     // Foreground: fitted, centered.
     const fit = Math.min(W / vw, H / vh);
@@ -422,7 +435,13 @@
     ctx.drawImage(video, (W - fw) / 2, (H - fh) / 2, fw, fh);
   }
 
-  function drawOnce() { Object.keys(canvases).forEach(draw); updateTime(); }
+  function drawOnce() {
+    if (video.videoWidth) {
+      const bg = blurredBackground();
+      Object.keys(canvases).forEach((fmt) => draw(fmt, bg));
+    }
+    updateTime();
+  }
   function loop() {
     drawOnce();
     raf = video.paused ? 0 : requestAnimationFrame(loop);
