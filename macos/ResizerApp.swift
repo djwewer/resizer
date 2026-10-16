@@ -103,9 +103,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUI
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard busy else { return .terminateNow }
         let alert = NSAlert()
-        alert.messageText = "Рендер ще триває"
-        alert.informativeText = "Якщо вийти, рендер буде скасовано, а незавершені файли видалено."
-        alert.addButton(withTitle: "Продовжити рендер")
+        alert.messageText = "Resizer ще працює"
+        alert.informativeText = "Іде рендер або встановлення ffmpeg. Якщо вийти, рендер буде скасовано, а незавершені файли видалено."
+        alert.addButton(withTitle: "Не виходити")
         alert.addButton(withTitle: "Скасувати й вийти")
         if alert.runModal() == .alertFirstButtonReturn { return .terminateCancel }
         cancelAllRenders()

@@ -31,6 +31,22 @@
 
   <main class="layout">
     <section class="col-main">
+      <!-- ffmpeg setup: shown instead of the drop zone while ffmpeg is missing -->
+      <div id="setup" class="glass setup" hidden>
+        <div class="drop-icon">
+          <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11m0 0 4.5-4.5M12 15l-4.5-4.5"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>
+        </div>
+        <div class="drop-title">Ще один крок — встановити ffmpeg</div>
+        <p class="setup-text">ffmpeg — безкоштовний рушій, яким Resizer рендерить відео. Його встановлюють один раз.</p>
+        <div class="setup-note" id="setupNote"></div>
+        <div class="setup-progress" id="setupProgress" hidden>
+          <div class="bar setup-bar"><span></span></div>
+          <div class="setup-line" id="setupLine"></div>
+        </div>
+        <pre id="setupErr" class="job-err" hidden></pre>
+        <button id="setupBtn" class="btn btn-primary setup-btn" type="button"></button>
+      </div>
+
       <!-- Drop zone -->
       <label id="drop" class="glass drop">
         <input id="fileInput" type="file" accept="video/*,.mov,.mp4,.m4v,.mkv,.webm" multiple hidden>

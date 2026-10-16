@@ -1,5 +1,5 @@
 #!/bin/bash
-# Resizer.app: checks Python/ffmpeg and starts the local server in the background.
+# Resizer.app: checks Python and starts the local server in the background.
 # Called by the app window (Contents/MacOS/Resizer). On success prints "URL PID" (PID 0 if the
 # server was already running); on failure shows a dialog itself and exits 1.
 
@@ -39,21 +39,7 @@ if [ -z "$PY" ]; then
   exit 1
 fi
 
-if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
-  if command -v brew >/dev/null 2>&1; then
-    CMD='brew install ffmpeg'
-  else
-    CMD='/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" && eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv)" && brew install ffmpeg'
-  fi
-  CMD="$CMD && echo && echo 'Готово. Запустіть Resizer ще раз.'"
-  ANSWER=$(osascript -e 'button returned of (display dialog "Для рендеру потрібен ffmpeg (один раз). Встановити зараз? Відкриється Термінал — після завершення запустіть Resizer ще раз." with title "Resizer" buttons {"Скасувати", "Встановити"} default button 2)' 2>/dev/null)
-  if [ "$ANSWER" = "Встановити" ]; then
-    ESC=${CMD//\\/\\\\}
-    ESC=${ESC//\"/\\\"}
-    osascript -e "tell application \"Terminal\" to do script \"$ESC\"" -e 'tell application "Terminal" to activate' >/dev/null
-  fi
-  exit 1
-fi
+# No ffmpeg check here: the window shows an install screen when it is missing.
 
 mkdir -p "$(dirname "$LOG")" "$OUT"
 # --idle-exit is a safety net: the window stops the server itself when it closes.

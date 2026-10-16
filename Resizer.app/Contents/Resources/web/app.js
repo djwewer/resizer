@@ -155,6 +155,14 @@
       const info = await r.json();
       state.encoders = info.encoders;
       state.outputDir = info.output_dir || '';
+      state.ffmpegReady = info.ffmpeg_ready !== false;
+      showSetup(info);
+      if (!state.ffmpegReady) {
+        const chip = $('#encChip');
+        chip.className = 'chip chip-warn';
+        chip.lastElementChild.textContent = 'ffmpeg не встановлено';
+        return;
+      }
       fillEncoderSelect();
       const best = (info.encoders.h264 || [])[0];
       const chip = $('#encChip');
@@ -169,6 +177,77 @@
       toast('Сервер недоступний. Запустіть resizer.py ще раз.');
     }
   }
+
+  // ---------------------------------------------------------------- ffmpeg setup
+  const LOCK = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>';
+  const INFO = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>';
+  let setupInfo = null;
+  let setupTimer = 0;
+
+  function showSetup(info) {
+    setupInfo = info;
+    const ready = info.ffmpeg_ready !== false;
+    $('#setup').hidden = ready;
+    drop.hidden = !ready;
+    if (ready) { clearTimeout(setupTimer); return; }
+    const note = $('#setupNote');
+    const btn = $('#setupBtn');
+    if (!info.can_install) {
+      note.innerHTML = `${INFO}<div>Встановіть ffmpeg і натисніть «Перевірити ще раз».
+        <small>Windows: <b>winget install Gyan.FFmpeg</b> · Linux: <b>sudo apt install ffmpeg</b></small></div>`;
+      btn.textContent = 'Перевірити ще раз';
+    } else if (info.has_brew) {
+      note.innerHTML = `${INFO}<div>Встановимо через Homebrew, який у вас уже є. Пароль не знадобиться.
+        <small>Займе кілька хвилин — прогрес видно тут.</small></div>`;
+      btn.textContent = 'Встановити ffmpeg';
+    } else {
+      note.innerHTML = `${LOCK}<div><b>Зараз macOS попросить пароль вашого Mac</b> — він потрібен, щоб встановити
+        Homebrew (стандартний менеджер програм для macOS) і через нього ffmpeg.
+        <small>Встановлення відкриється в Терміналі. Символи пароля там не відображаються під час введення — це нормально.
+        Займе 5–15 хвилин; Resizer продовжить сам, щойно ffmpeg з'явиться.</small></div>`;
+      btn.textContent = 'Встановити ffmpeg';
+    }
+    // Resume after a page reload while the install is still going.
+    fetch('/api/setup').then((r) => r.json()).then(renderSetup).catch(() => {});
+  }
+
+  function renderSetup(st) {
+    const running = st.status === 'running';
+    state.setupRunning = running;
+    $('#setupProgress').hidden = !running;
+    $('#setupBtn').hidden = running;
+    $('#setupErr').hidden = st.status !== 'error';
+    $('#setupErr').textContent = st.error || '';
+    if (st.status === 'error') $('#setupBtn').textContent = 'Спробувати ще раз';
+    $('#setupLine').textContent = st.mode === 'terminal'
+      ? 'Встановлення йде в Терміналі — введіть пароль, коли попросить…'
+      : st.line || 'Починаю…';
+    updateAll();
+    clearTimeout(setupTimer);
+    if (running) setupTimer = setTimeout(pollSetup, st.mode === 'terminal' ? 3000 : 1000);
+  }
+
+  async function pollSetup() {
+    try {
+      // ffmpeg installed in Terminal is noticed by /api/info; the in-app install reports via /api/setup.
+      const st = await (await fetch('/api/setup')).json();
+      if (st.status === 'done' || (st.mode === 'terminal' && (await (await fetch('/api/info')).json()).ffmpeg_ready)) {
+        state.setupRunning = false;
+        await loadInfo();
+        updateAll();
+        return;
+      }
+      renderSetup(st);
+    } catch (_) { setupTimer = setTimeout(pollSetup, 3000); }
+  }
+
+  $('#setupBtn').addEventListener('click', async () => {
+    if (!setupInfo?.can_install) { loadInfo(); return; }
+    try {
+      const st = await (await fetch('/api/setup/ffmpeg', { method: 'POST' })).json();
+      renderSetup(st);
+    } catch (_) { toast('Сервер недоступний'); }
+  });
 
   // ---------------------------------------------------------------- add files
   const drop = $('#drop');
@@ -185,6 +264,7 @@
 
   let seq = 0;
   function addFiles(files) {
+    if (state.ffmpegReady === false) { if (files.length) toast('Спершу встановіть ffmpeg'); return; }
     for (const f of files) {
       state.items.push({
         key: ++seq, file: f, name: f.name.replace(/\.[^.]+$/, ''),
@@ -546,7 +626,7 @@
     $('#jobErr').hidden = !err;
     $('#jobErr').textContent = err;
     // Tell the macOS app window whether closing it would cancel a render.
-    const busy = state.items.some((it) => ACTIVE.includes(itemStatus(it)));
+    const busy = state.setupRunning || state.items.some((it) => ACTIVE.includes(itemStatus(it)));
     if (busy !== wasBusy) {
       wasBusy = busy;
       try { window.webkit?.messageHandlers?.busy?.postMessage(busy); } catch (_) {}

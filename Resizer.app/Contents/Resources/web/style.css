@@ -127,6 +127,29 @@ h2 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -.005em; }
 .drop-title { font-size: 19px; font-weight: 600; }
 .drop-sub { color: var(--muted); font-size: 13.5px; margin-top: 6px; }
 
+/* ---------- ffmpeg setup ---------- */
+.setup {
+  min-height: 300px; padding: 40px 28px; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; text-align: center; gap: 4px;
+}
+.setup-text { color: var(--muted); font-size: 14px; max-width: 460px; margin: 8px 0 0; }
+.setup-note {
+  display: flex; gap: 12px; align-items: flex-start; text-align: left; max-width: 480px; margin-top: 16px;
+  padding: 14px 16px; border-radius: 16px; font-size: 13.5px; color: var(--text);
+  background: rgba(139,92,246,.14); border: 1px solid rgba(139,92,246,.4);
+}
+.setup-note svg { flex: none; margin-top: 1px; color: #c4b5fd; }
+.setup-note small { display: block; color: var(--muted); font-size: 12.5px; margin-top: 4px; }
+.setup-progress { width: min(420px, 100%); margin-top: 20px; }
+.setup-bar span { width: 35% !important; animation: indeterminate 1.4s ease-in-out infinite; }
+@keyframes indeterminate { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
+.setup-line {
+  font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--faint); margin-top: 10px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.setup .job-err { width: min(480px, 100%); margin-top: 14px; text-align: left; }
+.btn.setup-btn { width: auto; min-width: 240px; margin-top: 20px; }
+
 /* ---------- bars ---------- */
 .bar { height: 6px; border-radius: 99px; background: rgba(255,255,255,.08); overflow: hidden; }
 .bar span {

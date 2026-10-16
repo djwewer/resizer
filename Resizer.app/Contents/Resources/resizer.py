@@ -37,8 +37,16 @@ WORK_DIR = BASE / "work"
 UPLOAD_DIR = WORK_DIR / "uploads"
 OUTPUT_DIR = BASE / "output"
 
-FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
-FFPROBE = shutil.which("ffprobe") or "ffprobe"
+# Homebrew's bin dirs are searched too: an app launched from Finder has a minimal PATH.
+BREW_DIRS = ["/opt/homebrew/bin", "/usr/local/bin"]
+
+
+def find_tool(name: str) -> str | None:
+    return shutil.which(name) or shutil.which(name, path=os.pathsep.join(BREW_DIRS))
+
+
+FFMPEG = find_tool("ffmpeg") or "ffmpeg"
+FFPROBE = find_tool("ffprobe") or "ffprobe"
 
 # Width of the tiny frame the background is blurred at. Blurring a 160px frame
 # and upscaling it is ~100x cheaper than blurring the full-resolution frame and
@@ -88,6 +96,19 @@ def check_ffmpeg() -> None:
                 "  Windows: winget install Gyan.FFmpeg\n"
                 "  Linux:   sudo apt install ffmpeg"
             )
+
+
+def ffmpeg_ready() -> bool:
+    return bool(find_tool("ffmpeg") and find_tool("ffprobe"))
+
+
+def refresh_ffmpeg() -> None:
+    """Pick up ffmpeg after it was installed while the server is running."""
+    global FFMPEG, FFPROBE, _encoder_cache
+    FFMPEG = find_tool("ffmpeg") or "ffmpeg"
+    FFPROBE = find_tool("ffprobe") or "ffprobe"
+    with _encoder_lock:
+        _encoder_cache = None
 
 
 def _encoder_args_probe(enc: str) -> list[str]:
@@ -568,12 +589,19 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/ping":
             return self.send_json({"app": "resizer"})
         if p == "/api/info":
-            enc = detect_encoders()
+            ready = ffmpeg_ready()
+            if ready and not os.path.isabs(FFMPEG):
+                refresh_ffmpeg()   # installed in Terminal while Resizer was open
             return self.send_json({
-                "encoders": enc,
+                "encoders": detect_encoders() if ready else {},
                 "output_dir": str(OUTPUT_DIR),
                 "ffmpeg": FFMPEG,
+                "ffmpeg_ready": ready,
+                "can_install": sys.platform == "darwin",
+                "has_brew": bool(find_brew()),
             })
+        if p == "/api/setup":
+            return self.send_json(SETUP)
         if p == "/api/jobs":
             return self.send_json([j.public() for j in JOBS.values()])
         if p.startswith("/api/jobs/"):
@@ -597,6 +625,10 @@ class Handler(BaseHTTPRequestHandler):
         p = urlparse(self.path).path
         if p == "/api/upload":
             return self.handle_upload()
+        if p == "/api/setup/ffmpeg":
+            if sys.platform == "darwin":
+                start_setup()
+            return self.send_json(SETUP)
         if p == "/api/render":
             return self.handle_render()
         if p.startswith("/api/jobs/") and p.endswith("/cancel"):
@@ -643,6 +675,9 @@ class Handler(BaseHTTPRequestHandler):
         if remaining:
             dest.unlink(missing_ok=True)
             return self.send_json({"error": "Завантаження перервано"}, 400)
+        if not ffmpeg_ready():
+            dest.unlink(missing_ok=True)
+            return self.send_json({"error": "Спершу встановіть ffmpeg"}, 503)
         try:
             info = probe(dest)
         except ValueError as e:
@@ -675,6 +710,66 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json(job.public())
 
 
+# --------------------------------------------------------------------------- #
+# ffmpeg setup from the UI (macOS)
+# --------------------------------------------------------------------------- #
+
+# Without Homebrew the install runs in Terminal, where the user sees it and types the Mac password.
+TERMINAL_INSTALL = (
+    '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+    ' && eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv)"'
+    " && brew install ffmpeg && echo && echo 'Готово. Поверніться у Resizer.'"
+)
+SETUP: dict = {"status": "idle", "mode": "", "line": "", "error": ""}
+_setup_lock = threading.Lock()
+
+
+def find_brew() -> str | None:
+    return next((str(Path(d) / "brew") for d in BREW_DIRS if os.access(Path(d) / "brew", os.X_OK)), None)
+
+
+def brew_install_ffmpeg(brew: str) -> None:
+    """`brew install ffmpeg` in the background; the latest output line is shown in the UI."""
+    env = dict(os.environ, PATH=os.pathsep.join([*BREW_DIRS, os.environ.get("PATH", "")]),
+               HOMEBREW_NO_ENV_HINTS="1")
+    tail: list[str] = []
+    try:
+        proc = subprocess.Popen([brew, "install", "ffmpeg"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, text=True, env=env)
+        for line in proc.stdout:  # type: ignore[union-attr]
+            line = line.strip()
+            if line:
+                SETUP["line"] = line[:200]
+                tail.append(line)
+                del tail[:-15]
+        code = proc.wait()
+    except OSError as e:
+        code, tail = 1, [str(e)]
+    refresh_ffmpeg()
+    if code or not ffmpeg_ready():
+        SETUP["error"] = "Не вдалося встановити ffmpeg.\n\n" + "\n".join(tail[-6:])
+        SETUP["status"] = "error"
+        return
+    SETUP["line"] = "Перевіряю апаратне прискорення…"
+    detect_encoders()
+    SETUP["status"] = "done"
+
+
+def start_setup() -> None:
+    with _setup_lock:
+        if SETUP["status"] == "running":
+            return
+        brew = find_brew()
+        SETUP.update(status="running", line="", error="", mode="brew" if brew else "terminal")
+    if brew:
+        threading.Thread(target=brew_install_ffmpeg, args=(brew,), daemon=True).start()
+        return
+    esc = TERMINAL_INSTALL.replace("\\", "\\\\").replace('"', '\\"')
+    subprocess.Popen(["osascript", "-e", f'tell application "Terminal" to do script "{esc}"',
+                      "-e", 'tell application "Terminal" to activate'])
+    # The page polls /api/info and continues once ffmpeg shows up.
+
+
 def open_in_file_manager(path: Path) -> None:
     try:
         if sys.platform == "darwin":
@@ -702,7 +797,8 @@ def _stop_on_sigterm(*_):
 def serve(port: int, open_browser: bool, idle_exit: int = 0) -> None:
     shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
     signal.signal(signal.SIGTERM, _stop_on_sigterm)
-    threading.Thread(target=detect_encoders, daemon=True).start()
+    if ffmpeg_ready():
+        threading.Thread(target=detect_encoders, daemon=True).start()
     threading.Thread(target=queue_worker, daemon=True).start()
     httpd = None
     for p in range(port, port + 20):
@@ -725,7 +821,8 @@ def serve(port: int, open_browser: bool, idle_exit: int = 0) -> None:
         def watchdog():
             while True:
                 time.sleep(10)
-                busy = any(j.status in ("queued", "running") for j in JOBS.values())
+                busy = (any(j.status in ("queued", "running") for j in JOBS.values())
+                        or SETUP["status"] == "running")
                 if not busy and time.time() - LAST_SEEN > idle_exit:
                     httpd.shutdown()
                     return
@@ -834,7 +931,8 @@ def main() -> None:
     if args.work:
         WORK_DIR = Path(args.work).expanduser().resolve()
         UPLOAD_DIR = WORK_DIR / "uploads"
-    check_ffmpeg()
+    if args.list_encoders or args.inputs:
+        check_ffmpeg()   # the UI starts without ffmpeg and offers to install it
     if args.list_encoders:
         for codec, encs in detect_encoders().items():
             print(f"{codec}: " + (", ".join(f"{e['id']} ({e['label']})" for e in encs) or "—"))
