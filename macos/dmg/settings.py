@@ -4,7 +4,7 @@ import os
 app = defines["app"]
 background = defines["background"]
 
-format = "UDZO"
+format = defines.get("format", "UDZO")   # make-dmg.sh builds UDRW, fixes .DS_Store, then compresses
 files = [app]
 symlinks = {"Applications": "/Applications"}
 icon = os.path.join(app, "Contents", "Resources", "AppIcon.icns")   # volume icon

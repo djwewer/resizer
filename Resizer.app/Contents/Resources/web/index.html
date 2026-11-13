@@ -24,7 +24,7 @@
         </defs>
       </svg>
       <span>Resizer</span>
-      <small>9:16 → 16:9 · 1:1 · 4:5</small>
+      <small>9:16 → 4:5 · 1:1 · 16:9 · лого · пекшот</small>
     </div>
     <div id="encChip" class="chip chip-muted"><span class="dot"></span><span>Перевіряю GPU…</span></div>
   </header>
@@ -73,12 +73,13 @@
       <div id="previewWrap" class="glass preview" hidden>
         <div class="section-head">
           <h2>Прев'ю</h2>
-          <span class="hint">живий попередній перегляд — змінюйте блюр і затемнення справа</span>
+          <span class="hint">перетягніть лого мишкою, розмір — за кут · позиція запам'ятовується для кожного формату</span>
         </div>
         <div class="stages">
-          <figure class="stage" data-fmt="16x9"><canvas id="cv169"></canvas><figcaption>16:9</figcaption></figure>
-          <figure class="stage" data-fmt="1x1"><canvas id="cv11"></canvas><figcaption>1:1</figcaption></figure>
+          <figure class="stage" data-fmt="9x16"><canvas id="cv916"></canvas><figcaption>9:16</figcaption></figure>
           <figure class="stage" data-fmt="4x5"><canvas id="cv45"></canvas><figcaption>4:5</figcaption></figure>
+          <figure class="stage" data-fmt="1x1"><canvas id="cv11"></canvas><figcaption>1:1</figcaption></figure>
+          <figure class="stage" data-fmt="16x9"><canvas id="cv169"></canvas><figcaption>16:9</figcaption></figure>
         </div>
         <div class="transport">
           <button id="playBtn" class="icon-btn" type="button" aria-label="Відтворити">
@@ -93,6 +94,7 @@
           </button>
         </div>
         <video id="srcVideo" playsinline muted preload="auto" hidden></video>
+        <video id="pkVideo" playsinline muted preload="auto" hidden></video>
       </div>
 
       <!-- Results -->
@@ -116,12 +118,40 @@
         <div class="field">
           <div class="field-label">Формати</div>
           <div class="fmt-toggles">
-            <label class="fmt"><input type="checkbox" name="fmt" value="16x9" checked>
-              <span><i class="shape s169"></i>16:9<small id="dim169">1920×1080</small></span></label>
-            <label class="fmt"><input type="checkbox" name="fmt" value="1x1" checked>
-              <span><i class="shape s11"></i>1:1<small id="dim11">1080×1080</small></span></label>
+            <label class="fmt"><input type="checkbox" name="fmt" value="9x16" checked>
+              <span><i class="shape s916"></i>9:16<small id="dim916">1080×1920</small></span></label>
             <label class="fmt"><input type="checkbox" name="fmt" value="4x5" checked>
               <span><i class="shape s45"></i>4:5<small id="dim45">1080×1350</small></span></label>
+            <label class="fmt"><input type="checkbox" name="fmt" value="1x1" checked>
+              <span><i class="shape s11"></i>1:1<small id="dim11">1080×1080</small></span></label>
+            <label class="fmt"><input type="checkbox" name="fmt" value="16x9" checked>
+              <span><i class="shape s169"></i>16:9<small id="dim169">1920×1080</small></span></label>
+          </div>
+        </div>
+
+        <div class="field" id="logoField">
+          <div class="field-label">Логотип
+            <label class="check"><input type="checkbox" id="logoOn" checked> додати</label>
+          </div>
+          <div class="asset-row">
+            <div class="logo-thumb"><img id="logoThumb" alt="Логотип"></div>
+            <label class="btn btn-sm" title="PNG з прозорим фоном">Замінити
+              <input id="logoInput" type="file" accept="image/png,image/*" hidden></label>
+            <button id="logoReset" class="btn btn-sm btn-ghost" type="button" title="Повернути стандартний логотип" hidden>↺</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="field-label">Пекшот <span class="hint" id="pkHint"></span></div>
+          <label id="pkPick" class="pk-pick">
+            <input id="pkInput" type="file" accept="video/*,.mp4,.mov" hidden>
+            + Вибрати пекшот 9:16 (MP4)
+          </label>
+          <div id="pkBox" class="pk-box" hidden>
+            <div class="pk-meta"><b id="pkName"></b><span id="pkInfo"></span></div>
+            <label class="btn btn-sm btn-ghost" title="Замінити пекшот">Замінити
+              <input id="pkReplace" type="file" accept="video/*,.mp4,.mov" hidden></label>
+            <button id="pkRemove" class="icon-btn pk-x" type="button" title="Прибрати пекшот" aria-label="Прибрати пекшот">✕</button>
           </div>
         </div>
 

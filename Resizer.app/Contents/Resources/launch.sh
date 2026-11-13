@@ -11,6 +11,7 @@ URL="http://127.0.0.1:$PORT"
 LOG="$HOME/Library/Logs/Resizer.log"
 OUT="$HOME/Movies/Resizer"
 WORK="$HOME/Library/Caches/Resizer"
+DATA="$HOME/Library/Application Support/Resizer"
 
 alert() {
   osascript -e "display dialog \"$1\" with title \"Resizer\" buttons {\"OK\"} default button 1 with icon caution" >/dev/null 2>&1
@@ -43,7 +44,7 @@ fi
 
 mkdir -p "$(dirname "$LOG")" "$OUT"
 # --idle-exit is a safety net: the window stops the server itself when it closes.
-nohup "$PY" "$SCRIPT" --port "$PORT" --out "$OUT" --work "$WORK" --idle-exit 300 --no-browser \
+nohup "$PY" "$SCRIPT" --port "$PORT" --out "$OUT" --work "$WORK" --data "$DATA" --idle-exit 300 --no-browser \
   >"$LOG" 2>&1 </dev/null &
 PID=$!
 disown

@@ -24,7 +24,10 @@
     position: absolute; top: 42px; left: 0; right: 0; margin: 0; text-align: center;
     font-size: 23px; font-weight: 600; letter-spacing: -.01em; text-shadow: 0 2px 12px rgba(30, 10, 80, .35);
   }
-  .arrow { position: absolute; left: 262px; top: 181px; width: 116px; height: 48px; }
+  .arrow {
+    position: absolute; left: 256px; top: 173px; width: 128px; height: 64px;
+    filter: drop-shadow(0 4px 10px rgba(30, 10, 80, .45));
+  }
   .hint {
     position: absolute; bottom: 44px; left: 40px; right: 40px; text-align: center;
     font-size: 12px; line-height: 1.45; color: rgba(255, 255, 255, .82);
@@ -34,9 +37,9 @@
 </head>
 <body>
   <h1>Перетягніть Resizer у Applications</h1>
-  <svg class="arrow" viewBox="0 0 116 48" fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M6 24h94" stroke-width="5" stroke-dasharray="1 12" opacity=".9"/>
-    <path d="M88 10l16 14-16 14" stroke-width="5"/>
+  <!-- Solid arrow between the icons: drag Resizer (left) onto Applications (right). -->
+  <svg class="arrow" viewBox="0 0 128 64">
+    <path d="M8 24h70V8l46 24-46 24V40H8a8 8 0 0 1-8-8a8 8 0 0 1 8-8z" fill="#fff"/>
   </svg>
   <div class="hint">Перший запуск: якщо macOS не відкриває застосунок —<br>
     <b>Системні параметри → Конфіденційність і безпека → Все одно відкрити</b></div>

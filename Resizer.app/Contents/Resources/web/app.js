@@ -8,7 +8,7 @@
   const STORE_KEY = 'resizer.settings.v1';
   // Set by the macOS app window (Resizer.app); in a browser it is undefined.
   const NATIVE = !!window.RESIZER_NATIVE;
-  const ASPECTS = { '16x9': [16, 9], '1x1': [1, 1], '4x5': [4, 5] };
+  const ASPECTS = { '9x16': [9, 16], '4x5': [4, 5], '1x1': [1, 1], '16x9': [16, 9] };
   const ACTIVE = ['queued', 'running'];
 
   const state = {
@@ -18,15 +18,18 @@
     pollTimer: null,
     outputDir: '',
     settings: {
-      bitrate: 5, height: 1080, formats: ['16x9', '1x1', '4x5'], blur: 50, dim: 30,
-      codec: 'h264', encoder: 'auto', hw_decode: true,
+      bitrate: 5, height: 1080, formats: ['9x16', '4x5', '1x1', '16x9'], blur: 50, dim: 30,
+      codec: 'h264', encoder: 'auto', hw_decode: true, logo: true,
     },
     encoders: null,
+    assets: null,      // /api/assets: logo, logo_pos (per format), packshot, fade_frames
   };
 
   // ---------------------------------------------------------------- settings
   try {
     const saved = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
+    // Settings saved before 9:16 existed: switch the new format on once.
+    if (saved && !('logo' in saved) && Array.isArray(saved.formats)) saved.formats = ['9x16', ...saved.formats];
     if (saved) Object.assign(state.settings, saved);
   } catch (_) { /* storage unavailable */ }
   const persist = () => { try { localStorage.setItem(STORE_KEY, JSON.stringify(state.settings)); } catch (_) {} };
@@ -63,19 +66,21 @@
     $$('#resSeg button').forEach((b) => b.classList.toggle('on', +b.dataset.v === s.height));
     $$('#codecSeg button').forEach((b) => b.classList.toggle('on', b.dataset.v === s.codec));
     $('#hwdec').checked = s.hw_decode;
+    $('#logoOn').checked = s.logo;
     $$('.range').forEach(setRangeFill);
     updateDerived();
   }
 
   function updateDerived() {
     const s = state.settings;
-    const ids = { '16x9': '#dim169', '1x1': '#dim11', '4x5': '#dim45' };
+    const ids = { '9x16': '#dim916', '4x5': '#dim45', '1x1': '#dim11', '16x9': '#dim169' };
     for (const [fmt, id] of Object.entries(ids)) $(id).textContent = outSize(fmt, s.height).join('×');
     $$('.stage').forEach((st) => st.classList.toggle('off', !s.formats.includes(st.dataset.fmt)));
     const d = state.sel?.upload?.info?.duration;
     $('#sizeEst').textContent = d
       ? `≈ ${fmtBytes(s.bitrate * 1e6 / 8 * d)} на кожен файл (${fmtTime(d)})`
       : 'Для соцмереж 1080p достатньо 5–8 Мбіт/с';
+    $('.asset-row').classList.toggle('off', !s.logo);
     updateOutNames();
     updateRenderBtn();
   }
@@ -136,6 +141,70 @@
   bindSeg('#codecSeg', 'codec', String);
   $('#encoder').addEventListener('change', (e) => { state.settings.encoder = e.target.value; persist(); });
   $('#hwdec').addEventListener('change', (e) => { state.settings.hw_decode = e.target.checked; persist(); });
+  $('#logoOn').addEventListener('change', (e) => {
+    state.settings.logo = e.target.checked; persist(); updateDerived(); drawOnce();
+  });
+
+  // ---------------------------------------------------------------- logo & packshot
+  const logoImg = new Image();
+  logoImg.addEventListener('load', () => drawOnce());
+  const pkVideo = $('#pkVideo');
+  pkVideo.addEventListener('seeked', () => { if (video.paused) drawOnce(); });
+
+  async function loadAssets() {
+    try {
+      const r = await fetch('/api/assets');
+      if (r.ok) applyAssets(await r.json());
+    } catch (_) {}
+  }
+
+  function applyAssets(a) {
+    if (!a || a.error) return;
+    const prevPk = state.assets?.packshot?.url;
+    state.assets = a;
+    if (logoImg.getAttribute('src') !== a.logo.url) logoImg.src = a.logo.url;
+    $('#logoThumb').src = a.logo.url;
+    $('#logoReset').hidden = !a.logo.custom;
+    const pk = a.packshot;
+    $('#pkPick').hidden = !!pk;
+    $('#pkBox').hidden = !pk;
+    $('#pkHint').textContent = pk ? `з'являється за ${a.fade_frames} кадрів` : '';
+    if (pk) {
+      $('#pkName').textContent = pk.name;
+      const i = pk.info;
+      $('#pkInfo').textContent = `${i.width}×${i.height} · ${fmtTime(i.vduration)}`
+        + (i.width > i.height ? ' · не вертикальний — буде обрізаний' : '');
+    }
+    if (pk?.url !== prevPk) {
+      if (pk) { pkVideo.src = pk.url; pkVideo.load(); } else { pkVideo.removeAttribute('src'); pkVideo.load(); }
+    }
+    updateAll();
+    drawOnce();
+  }
+
+  async function uploadAsset(url, file, busyEl) {
+    if (!file) return;
+    busyEl.classList.add('busy');
+    try {
+      const r = await fetch(url, { method: 'POST', headers: { 'X-Filename': encodeURIComponent(file.name) }, body: file });
+      const res = await r.json();
+      if (!r.ok) toast(res.error || 'Не вдалося завантажити файл');
+      else applyAssets(res);
+    } catch (_) { toast('Сервер недоступний'); }
+    busyEl.classList.remove('busy');
+  }
+  const bindAssetInput = (sel, url, busySel) => $(sel).addEventListener('change', (e) => {
+    const f = e.target.files[0]; e.target.value = '';
+    uploadAsset(url, f, $(busySel));
+  });
+  bindAssetInput('#logoInput', '/api/assets/logo', '.asset-row .btn');
+  bindAssetInput('#pkInput', '/api/assets/packshot', '#pkPick');
+  bindAssetInput('#pkReplace', '/api/assets/packshot', '#pkBox');
+  const postAsset = async (url) => {
+    try { applyAssets(await (await fetch(url, { method: 'POST' })).json()); } catch (_) { toast('Сервер недоступний'); }
+  };
+  $('#logoReset').addEventListener('click', () => postAsset('/api/assets/logo/reset'));
+  $('#pkRemove').addEventListener('click', () => postAsset('/api/assets/packshot/delete'));
 
   // ---------------------------------------------------------------- encoders
   function fillEncoderSelect() {
@@ -164,6 +233,7 @@
         return;
       }
       fillEncoderSelect();
+      loadAssets();
       const best = (info.encoders.h264 || [])[0];
       const chip = $('#encChip');
       if (best && best.hardware) {
@@ -267,7 +337,7 @@
     if (state.ffmpegReady === false) { if (files.length) toast('Спершу встановіть ffmpeg'); return; }
     for (const f of files) {
       state.items.push({
-        key: ++seq, file: f, name: f.name.replace(/\.[^.]+$/, ''),
+        key: ++seq, file: f, name: f.name.replace(/\.[^.]+$/, ''), packshot: true,
         state: 'waiting', pct: 0, upload: null, job: null, el: null,
       });
     }
@@ -330,6 +400,7 @@
         <div class="file-tags"></div>
         <div class="bar"><span></span></div>
       </div>
+      <label class="q-pk" title="Накласти пекшот на кінець цього відео"><input type="checkbox" checked> Пекшот</label>
       <span class="q-status"></span>
       <button class="icon-btn q-retry" type="button" title="Рендерити ще раз" aria-label="Рендерити ще раз">↻</button>
       <button class="icon-btn q-remove" type="button">✕</button>`;
@@ -346,8 +417,11 @@
     });
     const remove = li.querySelector('.q-remove');
     remove.addEventListener('click', () => removeItem(it));
+    const pkLabel = li.querySelector('.q-pk');
+    const pk = pkLabel.querySelector('input');
+    pk.addEventListener('change', () => { it.packshot = pk.checked; if (state.sel === it) drawOnce(); });
     it.el = {
-      li, input, retry, remove, tags: li.querySelector('.file-tags'), bar: li.querySelector('.bar'),
+      li, input, retry, remove, pkLabel, pk, tags: li.querySelector('.file-tags'), bar: li.querySelector('.bar'),
       fill: li.querySelector('.bar span'), status: li.querySelector('.q-status'), tagged: false,
     };
   }
@@ -380,6 +454,8 @@
     el.bar.hidden = !(st === 'uploading' || st === 'running');
     el.fill.style.width = ((st === 'uploading' ? it.pct : job?.progress || 0) * 100).toFixed(1) + '%';
     el.input.disabled = !!job;     // the name is used when the render starts
+    el.pkLabel.hidden = !state.assets?.packshot;
+    el.pk.disabled = !!job;
     el.retry.hidden = !(job && !ACTIVE.includes(st));
     const cancel = ACTIVE.includes(st);
     el.remove.title = cancel ? 'Скасувати рендер' : 'Прибрати з черги';
@@ -427,7 +503,7 @@
 
   // ---------------------------------------------------------------- preview
   const video = $('#srcVideo');
-  const canvases = { '16x9': $('#cv169'), '1x1': $('#cv11'), '4x5': $('#cv45') };
+  const canvases = { '9x16': $('#cv916'), '4x5': $('#cv45'), '1x1': $('#cv11'), '16x9': $('#cv169') };
   const ctxs = {};
   let raf = 0;
   let previewUrl = '';
@@ -482,11 +558,11 @@
   }
 
   // Mirrors the ffmpeg graph: shrink to BG_WORK_WIDTH, blur, darken; draw() then crops and upscales.
-  function blurredBackground() {
+  function blurredBackground(src) {
     const vw = video.videoWidth, vh = video.videoHeight;
     const w = BG_WORK_WIDTH, h = Math.max(2, Math.round(w * vh / vw / 2) * 2);
     if (tiny.width !== w || tiny.height !== h) { tiny.width = w; tiny.height = h; }
-    tinyCtx.drawImage(video, 0, 0, w, h);
+    tinyCtx.drawImage(src, 0, 0, w, h);
     const img = tinyCtx.getImageData(0, 0, w, h);
     const s = state.settings;
     boxBlur(img.data, w, h, 1 + Math.round(s.blur / 100 * 11), 2);
@@ -497,7 +573,7 @@
     return { w, h };
   }
 
-  function draw(fmt, bg) {
+  function draw(fmt, bg, frame) {
     const ctx = ctxs[fmt]; const cv = canvases[fmt];
     if (!ctx || !video.videoWidth) return;
     const W = cv.width, H = cv.height, vw = video.videoWidth, vh = video.videoHeight;
@@ -512,15 +588,146 @@
     // Foreground: fitted, centered.
     const fit = Math.min(W / vw, H / vh);
     const fw = vw * fit, fh = vh * fit;
-    ctx.drawImage(video, (W - fw) / 2, (H - fh) / 2, fw, fh);
+    ctx.drawImage(frame.img, (W - fw) / 2, (H - fh) / 2, fw, fh);
+
+    // Logo: under the packshot, so it fades out while the packshot fades in (as in the render).
+    const r = logoRect(fmt);
+    if (r && frame.alpha < 1) {
+      ctx.globalAlpha = 1 - frame.alpha;
+      ctx.drawImage(logoImg, r.x, r.y, r.w, r.h);
+      ctx.globalAlpha = 1;
+    }
+    if (r && (hover === fmt || drag?.fmt === fmt)) {
+      const dpr = W / cv.clientWidth;
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,255,255,.9)'; ctx.lineWidth = dpr; ctx.setLineDash([4 * dpr, 3 * dpr]);
+      ctx.strokeRect(r.x, r.y, r.w, r.h);
+      ctx.setLineDash([]); ctx.fillStyle = '#fff';
+      const hs = HANDLE * dpr;
+      ctx.fillRect(r.x + r.w - hs / 2, r.y + r.h - hs / 2, hs, hs);
+      ctx.restore();
+    }
+  }
+
+  // ---- packshot in the preview: same timing as the render (ends with the video, fades in over N frames)
+  const mix = document.createElement('canvas');
+  const mixCtx = mix.getContext('2d');
+  function packshotAlpha() {
+    const pk = state.assets?.packshot;
+    const info = state.sel?.upload?.info;
+    if (!pk || !info || !state.sel.packshot || !pkVideo.videoWidth) return { alpha: 0 };
+    const dur = info.vduration || info.duration || video.duration || 0;
+    const t0 = Math.max(0, dur - pk.info.vduration);
+    const fade = state.assets.fade_frames / (info.fps || 30);
+    const t = video.currentTime;
+    return { alpha: Math.max(0, Math.min(1, (t - t0) / fade)), target: Math.max(0, t - t0), on: t >= t0 };
+  }
+  function syncPackshot(p) {
+    if (!p.on) { if (!pkVideo.paused) pkVideo.pause(); return; }
+    const drift = Math.abs(pkVideo.currentTime - p.target);
+    if (video.paused) {
+      if (!pkVideo.paused) pkVideo.pause();
+      if (drift > 0.03) pkVideo.currentTime = p.target;
+    } else {
+      if (drift > 0.25) pkVideo.currentTime = p.target;
+      if (pkVideo.paused) pkVideo.play().catch(() => {});
+    }
+  }
+  function frameSource() {
+    const p = packshotAlpha();
+    if (state.assets?.packshot) syncPackshot(p);
+    if (!p.alpha) return { img: video, alpha: 0 };
+    // Source frame with the packshot on top, cover-cropped like ffmpeg's scale+crop.
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const k = Math.min(1, 1280 / vh);
+    const w = Math.round(vw * k), h = Math.round(vh * k);
+    if (mix.width !== w || mix.height !== h) { mix.width = w; mix.height = h; }
+    mixCtx.globalAlpha = 1;
+    mixCtx.drawImage(video, 0, 0, w, h);
+    const pw = pkVideo.videoWidth, ph = pkVideo.videoHeight;
+    const s = Math.max(w / pw, h / ph);
+    mixCtx.globalAlpha = p.alpha;
+    mixCtx.drawImage(pkVideo, (w - pw * s) / 2, (h - ph * s) / 2, pw * s, ph * s);
+    mixCtx.globalAlpha = 1;
+    return { img: mix, alpha: p.alpha };
   }
 
   function drawOnce() {
     if (video.videoWidth) {
-      const bg = blurredBackground();
-      Object.keys(canvases).forEach((fmt) => draw(fmt, bg));
+      const frame = frameSource();
+      const bg = blurredBackground(frame.img);
+      Object.keys(canvases).forEach((fmt) => draw(fmt, bg, frame));
     }
     updateTime();
+  }
+
+  // ---- logo placement: drag to move, bottom-right handle to resize; saved per format
+  const HANDLE = 10;          // handle size, CSS px
+  let hover = null;           // format whose canvas the pointer is over
+  let drag = null;            // {fmt, mode: 'move'|'resize', x0, y0, pos0}
+  const logoPos = (fmt) => state.assets?.logo_pos?.[fmt];
+  function logoRect(fmt) {
+    const p = logoPos(fmt);
+    if (!state.settings.logo || !p || !logoImg.naturalWidth) return null;
+    const cv = canvases[fmt];
+    const w = p.w * cv.width;
+    return { x: p.x * cv.width, y: p.y * cv.height, w, h: w * logoImg.naturalHeight / logoImg.naturalWidth };
+  }
+  function hitTest(fmt, e) {
+    const r = logoRect(fmt);
+    if (!r) return null;
+    const cv = canvases[fmt];
+    const k = cv.width / cv.clientWidth;
+    const x = e.offsetX * k, y = e.offsetY * k, h = HANDLE * k;
+    if (Math.abs(x - (r.x + r.w)) <= h && Math.abs(y - (r.y + r.h)) <= h) return 'resize';
+    if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) return 'move';
+    return null;
+  }
+  let saveTimer = 0;
+  function saveLogoPos(fmt) {
+    clearTimeout(saveTimer);
+    const body = JSON.stringify({ [fmt]: logoPos(fmt) });
+    saveTimer = setTimeout(() => fetch('/api/logo-pos', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
+    }).catch(() => toast('Не вдалося зберегти позицію лого')), 150);
+  }
+  for (const [fmt, cv] of Object.entries(canvases)) {
+    cv.addEventListener('pointerdown', (e) => {
+      const mode = hitTest(fmt, e);
+      if (!mode) return;
+      e.preventDefault();
+      cv.setPointerCapture(e.pointerId);
+      drag = { fmt, mode, x0: e.offsetX, y0: e.offsetY, pos0: { ...logoPos(fmt) } };
+    });
+    cv.addEventListener('pointermove', (e) => {
+      if (drag?.fmt === fmt) {
+        const p = logoPos(fmt), p0 = drag.pos0;
+        const dx = (e.offsetX - drag.x0) / cv.clientWidth, dy = (e.offsetY - drag.y0) / cv.clientHeight;
+        const aspect = logoImg.naturalHeight / logoImg.naturalWidth * cv.width / cv.height;  // logo h / frame h per unit w
+        if (drag.mode === 'move') {
+          p.x = Math.max(0, Math.min(1 - p.w, p0.x + dx));
+          p.y = Math.max(0, Math.min(1 - p.w * aspect, p0.y + dy));
+        } else {
+          const maxW = Math.min(1 - p0.x, (1 - p0.y) / aspect);
+          p.w = Math.max(0.03, Math.min(maxW, p0.w + dx));
+        }
+        if (video.paused) drawOnce();
+        return;
+      }
+      const mode = hitTest(fmt, e);
+      cv.style.cursor = mode === 'resize' ? 'nwse-resize' : mode === 'move' ? 'move' : '';
+      // Outline the logo while the pointer is over its frame, so it is clear it can be moved.
+      if (hover !== fmt) { hover = fmt; if (video.paused) drawOnce(); }
+    });
+    const end = () => {
+      if (drag?.fmt !== fmt) return;
+      drag = null;
+      saveLogoPos(fmt);
+      if (video.paused) drawOnce();
+    };
+    cv.addEventListener('pointerup', end);
+    cv.addEventListener('pointercancel', end);
+    cv.addEventListener('pointerleave', () => { if (hover === fmt && !drag) { hover = null; if (video.paused) drawOnce(); } });
   }
   function loop() {
     drawOnce();
@@ -534,7 +741,7 @@
     if (video.paused) video.play(); else video.pause();
   });
   video.addEventListener('play', () => { setPlaying(true); if (!raf) raf = requestAnimationFrame(loop); });
-  video.addEventListener('pause', () => setPlaying(false));
+  video.addEventListener('pause', () => { setPlaying(false); pkVideo.pause(); drawOnce(); });
   video.addEventListener('ended', () => setPlaying(false));
   video.addEventListener('seeked', drawOnce);
   $('#muteBtn').addEventListener('click', () => {
@@ -567,7 +774,10 @@
     if (!state.batch.some((it) => ACTIVE.includes(itemStatus(it)))) state.batch = [];
     $('#renderBtn').disabled = true;
     for (const it of todo) {
-      const body = { id: it.upload.id, name: cleanName(it.name), ...state.settings };
+      const body = {
+        id: it.upload.id, name: cleanName(it.name), ...state.settings,
+        packshot: !!state.assets?.packshot && it.packshot,
+      };
       try {
         const r = await fetch('/api/render', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),

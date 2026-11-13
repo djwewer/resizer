@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Resizer — vertical video -> 16:9, 1:1 and 4:5 with a blurred background.
+Resizer — vertical video -> 9:16, 4:5, 1:1 and 16:9 with a blurred background,
+optional logo (placed per format) and an end packshot.
 
 Rendering is done by a native ffmpeg process (hardware encoders when available),
 the browser is only a UI running on localhost.
@@ -36,6 +37,8 @@ BASE = Path(os.environ.get("RESIZER_BASE") or ROOT)
 WORK_DIR = BASE / "work"
 UPLOAD_DIR = WORK_DIR / "uploads"
 OUTPUT_DIR = BASE / "output"
+DATA_DIR = BASE / "data"            # logo, packshot and prefs.json; Resizer.app: ~/Library/Application Support/Resizer
+DEFAULT_LOGO = ROOT / "assets" / "logo.png"
 
 # Homebrew's bin dirs are searched too: an app launched from Finder has a minimal PATH.
 BREW_DIRS = ["/opt/homebrew/bin", "/usr/local/bin"]
@@ -54,6 +57,7 @@ FFPROBE = find_tool("ffprobe") or "ffprobe"
 BG_WORK_WIDTH = 160
 
 FORMATS = {
+    "9x16": {"label": "9:16", "aspect": (9, 16)},
     "16x9": {"label": "16:9", "aspect": (16, 9)},
     "1x1": {"label": "1:1", "aspect": (1, 1)},
     "4x5": {"label": "4:5", "aspect": (4, 5)},
@@ -81,6 +85,9 @@ ENCODERS = {
 SOFTWARE = {"libx264", "libx265"}
 VAAPI_DEVICE = "/dev/dri/renderD128"
 COPYABLE_AUDIO = {"aac", "mp3", "alac", "ac3", "eac3"}
+FADE_FRAMES = 16                    # packshot fades in (and the logo out) over this many frames
+LOGO_MAX_WIDTH = 1600
+IMAGE_CODECS = {"png", "mjpeg", "webp", "bmp", "tiff", "gif"}               # bigger uploaded logos are downscaled once, not on every frame
 
 
 # --------------------------------------------------------------------------- #
@@ -184,6 +191,9 @@ def probe(path: Path) -> dict:
         w, h = h, w
 
     duration = float(data.get("format", {}).get("duration") or video.get("duration") or 0)
+    rate = video.get("avg_frame_rate") or "0/1"
+    if rate.startswith("0/") or rate.endswith("/0"):
+        rate = video.get("r_frame_rate") or "30/1"
     fps = 0.0
     try:
         num, den = (video.get("avg_frame_rate") or "0/1").split("/")
@@ -195,6 +205,9 @@ def probe(path: Path) -> dict:
         "height": h,
         "duration": duration,
         "fps": round(fps, 2),
+        "rate": rate,                                            # exact, e.g. 30000/1001
+        "start": float(video.get("start_time") or 0),
+        "vduration": float(video.get("duration") or duration),  # the packshot ends with the video
         "video_codec": video.get("codec_name"),
         "audio_codec": audio.get("codec_name") if audio else None,
         "size": path.stat().st_size,
@@ -211,6 +224,13 @@ class RenderOptions:
     codec: str = "h264"           # h264 | hevc
     encoder: str = "auto"
     hw_decode: bool = True
+    logo: bool = False
+    packshot: bool = False
+    # Filled in by the server when the job is created (a snapshot, so later changes do not affect it):
+    logo_path: str = ""
+    logo_pos: dict = field(default_factory=dict)   # fmt -> {x, y, w} as fractions of the frame
+    packshot_path: str = ""
+    packshot_dur: float = 0.0
 
     @classmethod
     def from_dict(cls, d: dict) -> "RenderOptions":
@@ -226,6 +246,8 @@ class RenderOptions:
         o.codec = d.get("codec", o.codec) if d.get("codec") in ENCODERS else "h264"
         o.encoder = str(d.get("encoder", "auto"))
         o.hw_decode = bool(d.get("hw_decode", True))
+        o.logo = bool(d.get("logo", False))
+        o.packshot = bool(d.get("packshot", False))
         return o
 
 
@@ -237,18 +259,43 @@ def out_size(fmt: str, height: int) -> tuple[int, int]:
     return round(height * aw / ah / 2) * 2, height
 
 
+def packshot_start(info: dict, opts: RenderOptions) -> float:
+    """The packshot ends together with the creative's video (timestamps of the source)."""
+    start = info.get("start") or 0.0
+    dur = info.get("vduration") or info.get("duration") or 0.0
+    return start + max(0.0, dur - opts.packshot_dur)
+
+
 def build_filter(info: dict, opts: RenderOptions, vaapi: bool) -> str:
     """
-    One decode -> shared foreground scale + one shared tiny blurred background,
-    then per-format crop/upscale/overlay. Labels [o0], [o1]... are the outputs.
+    One decode -> optional packshot on top of the source's end -> shared foreground scale +
+    one shared tiny blurred background, then per-format crop/upscale/overlay (+ logo).
+    Inputs: 0 = creative, then the packshot and the logo if used. Labels [o0], [o1]... are the outputs.
     """
     n = len(opts.formats)
     src_w, src_h = info["width"] or 1080, info["height"] or 1920
     radius = 1 + round(opts.blur / 100 * 11)             # boxblur radius on the 160px frame
     level = 1 - opts.dim / 100
     tail = "format=nv12,hwupload" if vaapi else "format=yuv420p"
+    fps = info.get("fps") or 30
+    fade = FADE_FRAMES / fps
+    pk_t0 = packshot_start(info, opts)
 
-    parts = [f"[0:v]split=2[bgsrc][fgsrc]"]
+    parts = []
+    src = "[0:v]"
+    nxt = 1
+    if opts.packshot_path:
+        # Cover-scale to the creative's size and frame rate, fade in from transparent, shift to the end.
+        parts.append(
+            f"[{nxt}:v]scale={src_w}:{src_h}:force_original_aspect_ratio=increase:flags=bicubic,"
+            f"crop={src_w}:{src_h},setsar=1,fps={info.get('rate') or fps},format=yuva420p,"
+            f"fade=t=in:st=0:d={fade:.4f}:alpha=1,setpts=PTS-STARTPTS+{pk_t0:.4f}/TB[pk]"
+        )
+        parts.append("[0:v][pk]overlay=0:0:eof_action=repeat[src]")
+        src = "[src]"
+        nxt += 1
+    logo_in = nxt if opts.logo_path else None
+    parts.append(f"{src}split=2[bgsrc][fgsrc]")
     # Background: shrink to 160px wide, blur, darken. Only once for all outputs.
     bg_h = max(2, round(BG_WORK_WIDTH * src_h / src_w / 2) * 2)
     parts.append(
@@ -283,8 +330,32 @@ def build_filter(info: dict, opts: RenderOptions, vaapi: bool) -> str:
         if not vertical:
             parts.append(f"[fr{i}]scale={W}:{H}:force_original_aspect_ratio=decrease:"
                          f"flags=bicubic,scale=trunc(iw/2)*2:trunc(ih/2)*2[fg{i}]")
-        parts.append(f"[b{i}][fg{i}]overlay=(W-w)/2:(H-h)/2,setsar=1,{tail}[o{i}]")
+        if logo_in is None:
+            parts.append(f"[b{i}][fg{i}]overlay=(W-w)/2:(H-h)/2,setsar=1,{tail}[o{i}]")
+            continue
+        parts.append(f"[b{i}][fg{i}]overlay=(W-w)/2:(H-h)/2[c{i}]")
+        pos = logo_rect(opts.logo_pos, opts.formats[i], W, H)
+        # The logo hides under the packshot: it fades out while the packshot fades in.
+        out_fade = f",fade=t=out:st={pk_t0:.4f}:d={fade:.4f}:alpha=1" if opts.packshot_path else ""
+        parts.append(f"[lg{i}]scale={pos[2]}:-2:flags=lanczos,format=rgba{out_fade}[l{i}]")
+        # shortest=1: the looped logo never ends by itself, the creative does.
+        parts.append(f"[c{i}][l{i}]overlay={pos[0]}:{pos[1]}:shortest=1,setsar=1,{tail}[o{i}]")
+    if logo_in is not None:
+        parts.append(f"[{logo_in}:v]format=rgba,split={n}" + "".join(f"[lg{i}]" for i in range(n)))
     return ";".join(parts)
+
+
+def default_logo_pos(fmt: str) -> dict:
+    """Centered near the top; narrower on 16:9 where the frame is wide."""
+    w = {"9x16": 0.36, "4x5": 0.32, "1x1": 0.28, "16x9": 0.18}.get(fmt, 0.3)
+    return {"x": round((1 - w) / 2, 4), "y": 0.05, "w": w}
+
+
+def logo_rect(positions: dict, fmt: str, W: int, H: int) -> tuple[int, int, int]:
+    """Pixel x, y and width (even) of the logo in a W x H frame."""
+    p = {**default_logo_pos(fmt), **(positions.get(fmt) or {})}
+    w = max(2, round(p["w"] * W / 2) * 2)
+    return round(p["x"] * W), round(p["y"] * H), w
 
 
 def encoder_args(enc: str, mbps: float) -> list[str]:
@@ -335,7 +406,13 @@ def build_command(src: Path, info: dict, opts: RenderOptions, enc: str, hw_decod
         cmd += ["-vaapi_device", VAAPI_DEVICE]
     if hw_decode and not vaapi:
         cmd += ["-hwaccel", "auto"]
-    cmd += ["-i", str(src), "-filter_complex", build_filter(info, opts, vaapi)]
+    cmd += ["-i", str(src)]
+    if opts.packshot_path:
+        cmd += ["-i", opts.packshot_path]
+    if opts.logo_path:
+        # A still image looped at the creative's frame rate, so the logo can fade out.
+        cmd += ["-loop", "1", "-framerate", str(info.get("rate") or 30), "-i", opts.logo_path]
+    cmd += ["-filter_complex", build_filter(info, opts, vaapi)]
 
     has_audio = info.get("audio_codec") is not None
     copy_audio = info.get("audio_codec") in COPYABLE_AUDIO
@@ -487,6 +564,98 @@ def run_job(job: Job, on_progress=None) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Logo, packshot and their settings (remembered between launches)
+# --------------------------------------------------------------------------- #
+
+_prefs_lock = threading.Lock()
+_packshot_info: dict = {}           # file name -> probe(), so it is read once
+
+
+def load_prefs() -> dict:
+    try:
+        return json.loads((DATA_DIR / "prefs.json").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_prefs(prefs: dict) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = DATA_DIR / "prefs.json.tmp"
+    tmp.write_text(json.dumps(prefs, ensure_ascii=False, indent=1))
+    tmp.replace(DATA_DIR / "prefs.json")
+
+
+def update_prefs(**changes) -> dict:
+    with _prefs_lock:
+        prefs = load_prefs()
+        prefs.update(changes)
+        save_prefs(prefs)
+        return prefs
+
+
+def logo_file(prefs: dict) -> Path:
+    custom = prefs.get("logo_file")
+    if custom and (DATA_DIR / custom).is_file():
+        return DATA_DIR / custom
+    return DEFAULT_LOGO
+
+
+def packshot_file(prefs: dict) -> Path | None:
+    name = prefs.get("packshot_file")
+    return DATA_DIR / name if name and (DATA_DIR / name).is_file() else None
+
+
+def packshot_info(path: Path) -> dict:
+    if path.name not in _packshot_info:
+        _packshot_info[path.name] = probe(path)
+    return _packshot_info[path.name]
+
+
+def in_use(path: Path) -> bool:
+    return any(j.status in ("queued", "running") and str(path) in (j.opts.logo_path, j.opts.packshot_path)
+               for j in JOBS.values())
+
+
+def drop_asset(name: str | None) -> None:
+    """Delete a replaced logo/packshot unless a queued render still needs it (cleaned up at the next start)."""
+    if name and not in_use(DATA_DIR / name):
+        (DATA_DIR / name).unlink(missing_ok=True)
+
+
+def clean_data_dir() -> None:
+    """Remove files left from replaced assets that were still rendering at the time."""
+    prefs = load_prefs()
+    keep = {"prefs.json", prefs.get("logo_file"), prefs.get("packshot_file")}
+    for f in DATA_DIR.glob("*"):
+        if f.is_file() and f.name not in keep:
+            f.unlink(missing_ok=True)
+
+
+def assets_public() -> dict:
+    prefs = load_prefs()
+    logo = logo_file(prefs)
+    try:
+        li = probe(logo)
+        logo_info = {"width": li["width"], "height": li["height"]}
+    except (ValueError, OSError):
+        logo_info = {}
+    pos = {fmt: {**default_logo_pos(fmt), **(prefs.get("logo_pos") or {}).get(fmt, {})} for fmt in FORMATS}
+    pk = packshot_file(prefs)
+    packshot = None
+    if pk:
+        try:
+            info = packshot_info(pk)
+            packshot = {"name": prefs.get("packshot_name") or pk.name, "info": info,
+                        "url": "/media/asset/packshot?v=" + pk.stem}
+        except ValueError:
+            packshot = None
+    return {
+        "logo": {"url": "/media/asset/logo?v=" + logo.stem, "custom": logo != DEFAULT_LOGO, **logo_info},
+        "logo_pos": pos, "packshot": packshot, "fade_frames": FADE_FRAMES,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # HTTP server
 # --------------------------------------------------------------------------- #
 
@@ -607,6 +776,13 @@ class Handler(BaseHTTPRequestHandler):
         if p.startswith("/api/jobs/"):
             job = JOBS.get(p.rsplit("/", 1)[-1])
             return self.send_json(job.public() if job else {"error": "not found"}, 200 if job else 404)
+        if p == "/api/assets":
+            return self.send_json(assets_public() if ffmpeg_ready() else {"error": "no ffmpeg"})
+        if p == "/media/asset/logo":
+            return self.send_file(logo_file(load_prefs()))
+        if p == "/media/asset/packshot":
+            pk = packshot_file(load_prefs())
+            return self.send_file(pk) if pk else self.send_json({"error": "not found"}, 404)
         if p.startswith("/media/upload/"):
             up = UPLOADS.get(p.rsplit("/", 1)[-1])
             return self.send_file(Path(up["path"])) if up else self.send_json({"error": "not found"}, 404)
@@ -631,6 +807,34 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(SETUP)
         if p == "/api/render":
             return self.handle_render()
+        if p == "/api/assets/logo":
+            return self.handle_logo_upload()
+        if p == "/api/assets/logo/reset":
+            prefs = load_prefs()
+            update_prefs(logo_file=None)
+            drop_asset(prefs.get("logo_file"))
+            return self.send_json(assets_public())
+        if p == "/api/assets/packshot":
+            return self.handle_packshot_upload()
+        if p == "/api/assets/packshot/delete":
+            prefs = load_prefs()
+            update_prefs(packshot_file=None, packshot_name=None)
+            drop_asset(prefs.get("packshot_file"))
+            return self.send_json(assets_public())
+        if p == "/api/logo-pos":
+            body = self.read_json()
+            with _prefs_lock:
+                prefs = load_prefs()
+                pos = prefs.get("logo_pos") or {}
+                for fmt, v in body.items():
+                    if fmt in FORMATS and isinstance(v, dict):
+                        try:
+                            pos[fmt] = {k: max(-1.0, min(2.0, float(v[k]))) for k in ("x", "y", "w")}
+                        except (KeyError, TypeError, ValueError):
+                            pass
+                prefs["logo_pos"] = pos
+                save_prefs(prefs)
+            return self.send_json({"ok": True})
         if p.startswith("/api/jobs/") and p.endswith("/cancel"):
             job = JOBS.get(p.split("/")[3])
             if job:
@@ -657,14 +861,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"ok": True})
         return self.send_json({"error": "not found"}, 404)
 
-    def handle_upload(self):
-        length = int(self.headers.get("Content-Length") or 0)
-        name = unquote(self.headers.get("X-Filename") or "video.mp4")
-        name = Path(name).name or "video.mp4"
-        fid = uuid.uuid4().hex[:12]
-        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        dest = UPLOAD_DIR / f"{fid}{Path(name).suffix.lower() or '.mp4'}"
-        remaining = length
+    def receive_file(self, dest: Path) -> bool:
+        """Save the request body to dest; False (and nothing saved) if the upload was cut off."""
+        remaining = int(self.headers.get("Content-Length") or 0)
+        dest.parent.mkdir(parents=True, exist_ok=True)
         with dest.open("wb") as f:
             while remaining > 0:
                 chunk = self.rfile.read(min(4 << 20, remaining))
@@ -674,6 +874,16 @@ class Handler(BaseHTTPRequestHandler):
                 remaining -= len(chunk)
         if remaining:
             dest.unlink(missing_ok=True)
+        return not remaining
+
+    def upload_name(self, default: str) -> str:
+        return Path(unquote(self.headers.get("X-Filename") or default)).name or default
+
+    def handle_upload(self):
+        name = self.upload_name("video.mp4")
+        fid = uuid.uuid4().hex[:12]
+        dest = UPLOAD_DIR / f"{fid}{Path(name).suffix.lower() or '.mp4'}"
+        if not self.receive_file(dest):
             return self.send_json({"error": "Завантаження перервано"}, 400)
         if not ffmpeg_ready():
             dest.unlink(missing_ok=True)
@@ -686,6 +896,43 @@ class Handler(BaseHTTPRequestHandler):
         UPLOADS[fid] = {"path": str(dest), "name": name, "info": info}
         return self.send_json({"id": fid, "name": name, "info": info,
                                "url": f"/media/upload/{fid}"})
+
+    def handle_logo_upload(self):
+        name = self.upload_name("logo.png")
+        tmp = DATA_DIR / f"upload_{uuid.uuid4().hex[:8]}{Path(name).suffix.lower()}"
+        if not self.receive_file(tmp):
+            return self.send_json({"error": "Завантаження перервано"}, 400)
+        # Stored as PNG (keeps transparency), at most LOGO_MAX_WIDTH wide.
+        dest = DATA_DIR / f"logo_{uuid.uuid4().hex[:8]}.png"
+        r = subprocess.run([FFMPEG, "-v", "error", "-y", "-i", str(tmp), "-frames:v", "1",
+                            "-vf", f"scale='min({LOGO_MAX_WIDTH},iw)':-2", "-pix_fmt", "rgba", str(dest)],
+                           capture_output=True, text=True)
+        tmp.unlink(missing_ok=True)
+        if r.returncode != 0 or not dest.is_file():
+            dest.unlink(missing_ok=True)
+            return self.send_json({"error": "Це не схоже на зображення (потрібен PNG)"}, 400)
+        old = load_prefs().get("logo_file")
+        update_prefs(logo_file=dest.name)
+        drop_asset(old)
+        return self.send_json(assets_public())
+
+    def handle_packshot_upload(self):
+        name = self.upload_name("packshot.mp4")
+        dest = DATA_DIR / f"packshot_{uuid.uuid4().hex[:8]}{Path(name).suffix.lower() or '.mp4'}"
+        if not self.receive_file(dest):
+            return self.send_json({"error": "Завантаження перервано"}, 400)
+        try:
+            info = packshot_info(dest)
+        except ValueError as e:
+            dest.unlink(missing_ok=True)
+            return self.send_json({"error": str(e)}, 400)
+        if info.get("video_codec") in IMAGE_CODECS or not info.get("vduration"):
+            dest.unlink(missing_ok=True)
+            return self.send_json({"error": "Пекшот має бути відео, а не картинка"}, 400)
+        old = load_prefs().get("packshot_file")
+        update_prefs(packshot_file=dest.name, packshot_name=name)
+        drop_asset(old)
+        return self.send_json(assets_public())
 
     def handle_delete_upload(self, fid: str):
         up = UPLOADS.get(fid)
@@ -703,6 +950,14 @@ class Handler(BaseHTTPRequestHandler):
         if not up:
             return self.send_json({"error": "Файл не знайдено, завантажте його ще раз"}, 404)
         opts = RenderOptions.from_dict(body)
+        prefs = load_prefs()
+        if opts.logo:
+            opts.logo_path = str(logo_file(prefs))
+            opts.logo_pos = dict(prefs.get("logo_pos") or {})
+        pk = packshot_file(prefs) if opts.packshot else None
+        if pk:
+            opts.packshot_path = str(pk)
+            opts.packshot_dur = packshot_info(pk).get("vduration") or 0.0
         job = Job(id=uuid.uuid4().hex[:12], src=Path(up["path"]), name=up["name"],
                   info=up["info"], opts=opts, out_name=str(body.get("name") or ""))
         JOBS[job.id] = job
@@ -796,6 +1051,7 @@ def _stop_on_sigterm(*_):
 
 def serve(port: int, open_browser: bool, idle_exit: int = 0) -> None:
     shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
+    clean_data_dir()
     signal.signal(signal.SIGTERM, _stop_on_sigterm)
     if ffmpeg_ready():
         threading.Thread(target=detect_encoders, daemon=True).start()
@@ -906,12 +1162,12 @@ def cli(args) -> None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Вертикальне відео → 16:9, 1:1 і 4:5 з розмитим фоном")
+    ap = argparse.ArgumentParser(description="Вертикальне відео → 9:16, 4:5, 1:1 і 16:9 з розмитим фоном")
     ap.add_argument("inputs", nargs="*", help="відеофайли (без них запускається інтерфейс)")
     ap.add_argument("-b", "--bitrate", type=float, default=5.0, help="бітрейт, Мбіт/с (5)")
     ap.add_argument("-r", "--res", type=int, default=1080, choices=[720, 1080, 1440, 2160],
                     help="коротка сторона виходу (1080): 1920×1080, 1080×1080, 1080×1350")
-    ap.add_argument("-f", "--formats", default="16x9,1x1", help="16x9,1x1,4x5")
+    ap.add_argument("-f", "--formats", default="16x9,1x1", help="9x16,4x5,1x1,16x9")
     ap.add_argument("--blur", type=int, default=50, help="сила блюру 0-100 (50)")
     ap.add_argument("--dim", type=int, default=30, help="затемнення фону 0-80%% (30)")
     ap.add_argument("--codec", choices=list(ENCODERS), default="h264")
@@ -924,10 +1180,13 @@ def main() -> None:
     ap.add_argument("--idle-exit", type=int, default=0,
                     help="зупинити сервер через N секунд після закриття вкладки (0 — ніколи)")
     ap.add_argument("--work", help="папка для тимчасових файлів (./work)")
+    ap.add_argument("--data", help="папка для логотипа, пекшоту і налаштувань (./data)")
     ap.add_argument("--list-encoders", action="store_true")
     args = ap.parse_args()
 
-    global OUTPUT_DIR, WORK_DIR, UPLOAD_DIR
+    global OUTPUT_DIR, WORK_DIR, UPLOAD_DIR, DATA_DIR
+    if args.data:
+        DATA_DIR = Path(args.data).expanduser().resolve()
     if args.work:
         WORK_DIR = Path(args.work).expanduser().resolve()
         UPLOAD_DIR = WORK_DIR / "uploads"
